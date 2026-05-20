@@ -7,20 +7,22 @@ DEST="${INSTALL_DIR}/${SCRIPT_NAME}"
 
 mkdir -p "${INSTALL_DIR}"
 
-# ── version check ──────────────────────────────────────────────────────────
-NEW_VERSION=$(grep -m1 '^__version__ = ' "$0" | grep -o '"[^"]*"' | tr -d '"')
-if [ -f "${DEST}" ]; then
-    OLD_VERSION=$(grep -m1 '^__version__ = ' "${DEST}" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"' || true)
-    if [ "${NEW_VERSION}" = "${OLD_VERSION}" ]; then
-        echo "Already up to date (v${NEW_VERSION})"
-        exit 0
+# ── version check (skipped when piped through bash) ───────────────────────
+if [ -f "$0" ]; then
+    NEW_VERSION=$(grep -m1 '^__version__ = ' "$0" | grep -o '"[^"]*"' | tr -d '"')
+    if [ -f "${DEST}" ]; then
+        OLD_VERSION=$(grep -m1 '^__version__ = ' "${DEST}" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"' || true)
+        if [ "${NEW_VERSION}" = "${OLD_VERSION}" ]; then
+            echo "Already up to date (v${NEW_VERSION})"
+            exit 0
+        fi
     fi
 fi
 
 cat > "${DEST}" << 'END_OF_SCRIPT'
 #!/usr/bin/env python3
 """espresso — Mouse Mover. No args: TUI manager. --daemon [minutes] [--always]: background process."""
-__version__ = "0.0.13"
+__version__ = "0.0.14"
 import os, sys, ctypes, time, random, subprocess, signal
 
 _DAEMON_MODE = '--daemon' in sys.argv
