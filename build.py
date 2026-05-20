@@ -182,18 +182,16 @@ set -euo pipefail
 INSTALL_DIR="${HOME}/.local/bin"
 SCRIPT_NAME="espresso"
 DEST="${INSTALL_DIR}/${SCRIPT_NAME}"
+VERSION="__SCRIPT_VERSION__"
 
 mkdir -p "${INSTALL_DIR}"
 
-# ── version check (skipped when piped through bash) ───────────────────────
-if [ -f "$0" ]; then
-    NEW_VERSION=$(grep -m1 '^__version__ = ' "$0" | grep -o '"[^"]*"' | tr -d '"')
-    if [ -f "${DEST}" ]; then
-        OLD_VERSION=$(grep -m1 '^__version__ = ' "${DEST}" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"' || true)
-        if [ "${NEW_VERSION}" = "${OLD_VERSION}" ]; then
-            echo "Already up to date (v${NEW_VERSION})"
-            exit 0
-        fi
+# ── version check ──────────────────────────────────────────────────────────
+if [ -f "${DEST}" ]; then
+    OLD_VERSION=$(grep -m1 '^__version__ = ' "${DEST}" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"' || true)
+    if [ "${VERSION}" = "${OLD_VERSION}" ]; then
+        echo "Already up to date (v${VERSION})"
+        exit 0
     fi
 fi
 
@@ -274,7 +272,7 @@ def main():
         + PYTHON_ENTRYPOINT
     )
 
-    install_sh = BASH_HEADER + python_script + BASH_FOOTER
+    install_sh = BASH_HEADER.replace('__SCRIPT_VERSION__', new_version) + python_script + BASH_FOOTER
 
     with open(INSTALL_SH, 'w') as f:
         f.write(install_sh)
