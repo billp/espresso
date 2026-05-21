@@ -9,9 +9,7 @@ class Espresso < Formula
   depends_on "python@3"
 
   def install
-    # install.sh bundles the full Python script — extract and install it
-    system "bash", cached_download, "--prefix=#{prefix}"
-    bin.install "#{ENV["HOME"]}/.local/bin/espresso"
+    system "env", "INSTALL_DIR=#{bin}", "bash", cached_download
   end
 
   test do

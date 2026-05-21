@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_DIR="${HOME}/.local/bin"
+INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 SCRIPT_NAME="espresso"
 DEST="${INSTALL_DIR}/${SCRIPT_NAME}"
 VERSION="0.0.15"
