@@ -24,7 +24,7 @@ Unlike `caffeinate`, espresso gives you a live TUI to start/stop the daemon, tun
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/billp/espresso/refs/heads/develop/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/billp/espresso/refs/heads/main/install.sh | bash
 ```
 
 This creates `~/.local/bin/espresso`. If that directory isn't in your `PATH`, add it:
