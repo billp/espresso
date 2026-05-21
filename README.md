@@ -7,7 +7,7 @@
 |_____|_____|__|  |__|__|_____|_____|_____|_____|
 ```
 
-[![CI](https://github.com/billp/espresso/actions/workflows/ci.yml/badge.svg)](https://github.com/billp/espresso/actions/workflows/ci.yml)
+[![CI](https://github.com/billp/espresso/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/billp/espresso/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![Python 3](https://img.shields.io/badge/python-3-blue)
