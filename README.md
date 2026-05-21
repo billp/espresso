@@ -39,7 +39,7 @@ export PATH="$HOME/.local/bin:$PATH"
 espresso
 ```
 
-![espresso TUI](screenshot.png)
+<img src="screenshot.png" width="485" height="444" />
 
 **Options**
 
