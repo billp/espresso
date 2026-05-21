@@ -39,22 +39,7 @@ export PATH="$HOME/.local/bin:$PATH"
 espresso
 ```
 
-Navigate with `↑ ↓`, select with `Enter`, quit with `q`.
-
-```
-  Status    ○ NOT RUNNING
-
-  ┌──────────────────────────────────────────────┐
-  │  › ▶ Start                                   │
-  │    ✕ Quit                                    │
-  └──────────────────────────────────────────────┘
-
-  options
-  ┌──────────────────────────────────────────────┐
-  │    [12]  Interval (seconds)                  │
-  │    [ ]   Lock screen only                    │
-  └──────────────────────────────────────────────┘
-```
+![espresso TUI](screenshot.png)
 
 **Options**
 
