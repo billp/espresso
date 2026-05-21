@@ -20,11 +20,6 @@ A macOS mouse mover that prevents your screen from sleeping. Runs silently in th
 curl -fsSL https://raw.githubusercontent.com/billp/espresso/refs/heads/develop/install.sh | bash
 ```
 
-> If the install fails due to a stale CDN cache, pin to the latest commit SHA:
-> ```bash
-> curl -fsSL https://raw.githubusercontent.com/billp/espresso/d915633/install.sh | bash
-> ```
-
 This creates `~/.local/bin/espresso`. If that directory isn't in your `PATH`, add it:
 
 ```bash
