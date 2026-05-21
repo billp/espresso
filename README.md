@@ -7,7 +7,14 @@
 |_____|_____|__|  |__|__|_____|_____|_____|_____|
 ```
 
+[![CI](https://github.com/billp/espresso/actions/workflows/ci.yml/badge.svg)](https://github.com/billp/espresso/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+![Python 3](https://img.shields.io/badge/python-3-blue)
+
 A macOS mouse mover that prevents your screen from sleeping. Runs silently in the background and is managed through an interactive terminal UI.
+
+Unlike `caffeinate`, espresso gives you a live TUI to start/stop the daemon, tune the nudge interval, and enable a **lock-screen-only** mode — all without leaving the terminal.
 
 ## Requirements
 
@@ -75,3 +82,7 @@ After editing either file, regenerate and reinstall:
 python3 build.py   # bumps version, regenerates install.sh
 bash install.sh    # installs to ~/.local/bin/espresso
 ```
+
+---
+
+If espresso is useful to you, consider giving it a ⭐ on GitHub — it helps others find it.
