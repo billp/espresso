@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
+INSTALL_DIR="${HOME}/.local/bin"
 SCRIPT_NAME="espresso"
 DEST="${INSTALL_DIR}/${SCRIPT_NAME}"
-VERSION="0.0.15"
+VERSION="0.0.16"
 
 mkdir -p "${INSTALL_DIR}"
 
@@ -20,7 +20,7 @@ fi
 cat > "${DEST}" << 'END_OF_SCRIPT'
 #!/usr/bin/env python3
 """espresso — Mouse Mover. No args: TUI manager. --daemon [minutes] [--always]: background process."""
-__version__ = "0.0.15"
+__version__ = "0.0.16"
 import os, sys, ctypes, time, random, subprocess, signal
 
 _DAEMON_MODE = '--daemon' in sys.argv
