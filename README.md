@@ -41,7 +41,7 @@ espresso
 
 Navigate with `↑ ↓`, select with `Enter`, quit with `q`.
 
-![espresso screenshot](assets/screenshot.png)
+<img src="assets/screenshot.png" width="480" />
 
 ## Options
 
