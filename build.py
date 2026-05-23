@@ -70,7 +70,7 @@ def find_mm_processes():
             continue
 
         tokens = cmd.split()
-        if not tokens or not os.path.basename(tokens[0]).startswith('python'):
+        if not tokens or not os.path.basename(tokens[0]).lower().startswith('python'):
             continue
 
         if not any(os.path.basename(t) == SCRIPT_NAME for t in tokens[1:]):
@@ -84,22 +84,44 @@ def find_mm_processes():
         if pid == my_pid:
             continue
 
-        minutes   = DEFAULT_MINUTES
-        lock_only = True
+        minutes    = DEFAULT_MINUTES
+        lock_only  = True
+        start_time = None
+        end_time   = None
+        days       = None
         try:
             daemon_idx = tokens.index('--daemon')
-            for tok in tokens[daemon_idx + 1:]:
+            rest = tokens[daemon_idx + 1:]
+            j = 0
+            while j < len(rest):
+                tok = rest[j]
                 if tok == '--always':
                     lock_only = False
+                elif tok == '--start' and j + 1 < len(rest):
+                    j += 1
+                    start_time = rest[j]
+                elif tok == '--end' and j + 1 < len(rest):
+                    j += 1
+                    end_time = rest[j]
+                elif tok == '--days' and j + 1 < len(rest):
+                    j += 1
+                    try:
+                        days = [int(d) for d in rest[j].split(',') if d.strip()]
+                    except ValueError:
+                        pass
                 else:
                     try:
                         minutes = float(tok)
                     except ValueError:
                         pass
+                j += 1
         except ValueError:
             pass
 
-        procs.append({'pid': pid, 'param': minutes, 'lock_only': lock_only})
+        procs.append({
+            'pid': pid, 'param': minutes, 'lock_only': lock_only,
+            'start_time': start_time, 'end_time': end_time, 'days': days,
+        })
 
     return procs'''
 
@@ -219,7 +241,7 @@ PYTHON_MANAGER_HEADER = '''\
 # ── TUI manager ────────────────────────────────────────────────────────────
 
 if not _DAEMON_MODE:
-    import re, tty, termios, threading, select
+    import re, tty, termios, threading, select, json
 
 '''
 

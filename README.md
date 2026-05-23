@@ -14,7 +14,7 @@
 
 A macOS mouse mover that prevents your screen from sleeping. Runs silently in the background and is managed through an interactive terminal UI.
 
-Unlike `caffeinate`, espresso gives you a live TUI to start/stop the daemon, tune the nudge interval, and enable a **lock-screen-only** mode — all without leaving the terminal.
+Unlike `caffeinate`, espresso gives you a live TUI to start/stop the daemon, tune the nudge interval, restrict it to lock-screen-only mode, and schedule it to specific hours and days of the week — all without leaving the terminal.
 
 ## Requirements
 
@@ -39,16 +39,20 @@ export PATH="$HOME/.local/bin:$PATH"
 espresso
 ```
 
-<img src="screenshot.png" width="485" height="444" />
+Navigate with `↑ ↓`, select with `Enter`, quit with `q`.
 
-**Options**
+<img src="assets/screenshot.png" width="480" />
+
+## Options
 
 | Option | Default | Description |
 |---|---|---|
-| Interval | 12 sec | How often the mouse nudges |
+| Interval | 12 sec | How often the mouse nudges (↑↓ ±1 s, ←→ ±10 s) |
 | Lock screen only | off | Only move the mouse when the screen is locked |
+| Schedule | always | Active time window (e.g. 09:00→18:00) |
+| Active days | all | Days of the week the daemon is allowed to run |
 
-When the daemon is running, changing either option restarts it automatically in the background.
+All settings persist to `~/.config/espresso/config.json` and are restored on next launch. Changing any option while the daemon is running restarts it automatically.
 
 ## How it works
 
