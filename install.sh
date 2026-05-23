@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
+INSTALL_DIR="${HOME}/.local/bin"
 SCRIPT_NAME="espresso"
 DEST="${INSTALL_DIR}/${SCRIPT_NAME}"
-VERSION="0.0.15"
+VERSION="0.0.27"
 
 mkdir -p "${INSTALL_DIR}"
 
@@ -20,7 +20,7 @@ fi
 cat > "${DEST}" << 'END_OF_SCRIPT'
 #!/usr/bin/env python3
 """espresso — Mouse Mover. No args: TUI manager. --daemon [minutes] [--always]: background process."""
-__version__ = "0.0.15"
+__version__ = "0.0.27"
 import os, sys, ctypes, time, random, subprocess, signal
 
 _DAEMON_MODE = '--daemon' in sys.argv
@@ -29,6 +29,8 @@ if _DAEMON_MODE:
 
 
 # ── CoreGraphics / daemon ──────────────────────────────────────────────────
+
+from datetime import datetime
 
 _cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
 
@@ -84,6 +86,31 @@ def is_locked():
     return 'Yes' in r.stdout
 
 
+def _parse_hhmm(s):
+    """Parse 'HH:MM' string into (hour, minute) tuple, or None on failure."""
+    try:
+        h, m = s.split(':')
+        return (int(h), int(m))
+    except Exception:
+        return None
+
+
+def is_within_schedule(start_hm, end_hm, allowed_days):
+    """Return True if current time/day falls within the configured schedule."""
+    now = datetime.now()
+    if allowed_days is not None and now.weekday() not in allowed_days:
+        return False
+    if start_hm is not None and end_hm is not None:
+        cur = now.hour * 60 + now.minute
+        s   = start_hm[0] * 60 + start_hm[1]
+        e   = end_hm[0]   * 60 + end_hm[1]
+        if s <= e:
+            return s <= cur <= e
+        else:  # overnight range e.g. 22:00–06:00
+            return cur >= s or cur <= e
+    return True
+
+
 def get_mouse_pos():
     evt = _cg.CGEventCreate(None)
     pos = _cg.CGEventGetLocation(evt)
@@ -99,26 +126,49 @@ def move_mouse(x, y):
 
 
 def _daemon_main():
-    minutes = 0.2
-    always_mode = False
+    minutes      = 0.2
+    always_mode  = False
+    start_hm     = None
+    end_hm       = None
+    allowed_days = None
 
-    for arg in sys.argv[1:]:
-        if arg == '--always':
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == '--always':
             always_mode = True
-        else:
+        elif a == '--start' and i + 1 < len(args):
+            i += 1
+            start_hm = _parse_hhmm(args[i])
+        elif a == '--end' and i + 1 < len(args):
+            i += 1
+            end_hm = _parse_hhmm(args[i])
+        elif a == '--days' and i + 1 < len(args):
+            i += 1
             try:
-                minutes = float(arg)
+                allowed_days = [int(d) for d in args[i].split(',') if d.strip()]
             except ValueError:
                 pass
+        else:
+            try:
+                minutes = float(a)
+            except ValueError:
+                pass
+        i += 1
 
-    display = _cg.CGMainDisplayID()
-    bounds = _cg.CGDisplayBounds(display)
-    width = bounds.size.width
-    height = bounds.size.height
+    display  = _cg.CGMainDisplayID()
+    bounds   = _cg.CGDisplayBounds(display)
+    width    = bounds.size.width
+    height   = bounds.size.height
     interval = minutes * 60
 
     while True:
         if not always_mode and not is_locked():
+            time.sleep(interval)
+            continue
+
+        if not is_within_schedule(start_hm, end_hm, allowed_days):
             time.sleep(interval)
             continue
 
@@ -137,7 +187,7 @@ def _daemon_main():
 # ── TUI manager ────────────────────────────────────────────────────────────
 
 if not _DAEMON_MODE:
-    import re, tty, termios, threading, select
+    import re, tty, termios, threading, select, json
 
     RESET        = "\033[0m"
     BOLD         = "\033[1m"
@@ -165,9 +215,35 @@ if not _DAEMON_MODE:
     DEFAULT_MINUTES = 0.2
     SCRIPT_SELF     = os.path.abspath(sys.argv[0])
     SCRIPT_NAME     = os.path.basename(SCRIPT_SELF)
+    CONFIG_PATH     = os.path.expanduser('~/.config/espresso/config.json')
 
-    ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'lock_toggle']
-    ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'lock_toggle']
+    ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'lock_toggle', 'schedule', 'days']
+    ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'lock_toggle', 'schedule', 'days']
+
+    DAY_NAMES = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
+
+
+    # ── config ─────────────────────────────────────────────────────────────────
+
+    def load_config():
+        try:
+            with open(CONFIG_PATH) as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+        return {
+            'start_time': cfg.get('start_time'),
+            'end_time':   cfg.get('end_time'),
+            'days':       cfg.get('days'),
+            'interval':   cfg.get('interval'),
+            'lock_only':  cfg.get('lock_only'),
+        }
+
+
+    def save_config(cfg):
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(cfg, f, indent=2)
 
 
     # ── process detection ──────────────────────────────────────────────────────
@@ -191,7 +267,7 @@ if not _DAEMON_MODE:
                 continue
 
             tokens = cmd.split()
-            if not tokens or not os.path.basename(tokens[0]).startswith('python'):
+            if not tokens or not os.path.basename(tokens[0]).lower().startswith('python'):
                 continue
 
             if not any(os.path.basename(t) == SCRIPT_NAME for t in tokens[1:]):
@@ -205,22 +281,44 @@ if not _DAEMON_MODE:
             if pid == my_pid:
                 continue
 
-            minutes   = DEFAULT_MINUTES
-            lock_only = True
+            minutes    = DEFAULT_MINUTES
+            lock_only  = True
+            start_time = None
+            end_time   = None
+            days       = None
             try:
                 daemon_idx = tokens.index('--daemon')
-                for tok in tokens[daemon_idx + 1:]:
+                rest = tokens[daemon_idx + 1:]
+                j = 0
+                while j < len(rest):
+                    tok = rest[j]
                     if tok == '--always':
                         lock_only = False
+                    elif tok == '--start' and j + 1 < len(rest):
+                        j += 1
+                        start_time = rest[j]
+                    elif tok == '--end' and j + 1 < len(rest):
+                        j += 1
+                        end_time = rest[j]
+                    elif tok == '--days' and j + 1 < len(rest):
+                        j += 1
+                        try:
+                            days = [int(d) for d in rest[j].split(',') if d.strip()]
+                        except ValueError:
+                            pass
                     else:
                         try:
                             minutes = float(tok)
                         except ValueError:
                             pass
+                    j += 1
             except ValueError:
                 pass
 
-            procs.append({'pid': pid, 'param': minutes, 'lock_only': lock_only})
+            procs.append({
+                'pid': pid, 'param': minutes, 'lock_only': lock_only,
+                'start_time': start_time, 'end_time': end_time, 'days': days,
+            })
 
         return procs
 
@@ -246,6 +344,20 @@ if not _DAEMON_MODE:
         return f"{minutes * 60:g}"
 
 
+    def fmt_schedule(start_time, end_time):
+        if start_time and end_time:
+            return f"{start_time}→{end_time}"
+        return "always"
+
+
+    def fmt_days(days):
+        if days is None:
+            return "all"
+        if not days:
+            return "none"
+        return " ".join(DAY_NAMES[d] for d in sorted(days))
+
+
     LOGO = [
         " _____ _____ _____ _____ _____ _____ _____ _____ ",
         "|   __|   __|  _  | __  |   __|   __|   __|     |",
@@ -253,40 +365,48 @@ if not _DAEMON_MODE:
         "|_____|_____|__|  |__|__|_____|_____|_____|_____|",
     ]
 
-    BRACKET_W = 6  # fixed bracket column width — keeps labels aligned across all items
+    def _item_label(key, lock_only, minutes, selected, cfg=None, avail=42):
+        """Build the label for a menu item. Options right-align their bracket value."""
+        if cfg is None:
+            cfg = {}
 
+        # ── action items (no bracket) ──
+        if key in ('run', 'stop', 'quit'):
+            text = {'run': '▶ Start', 'stop': '■ Stop', 'quit': '✕ Quit'}[key]
+            return (f"{BOLD}{WHITE}{text}{RESET}" if selected else f"{GRAY}{text}{RESET}")
 
-    def _cb(raw, prefix):
-        """Color raw bracket text and right-pad to BRACKET_W."""
-        pad = ' ' * max(0, BRACKET_W - len(raw))
-        return f"{prefix}{raw}{RESET}{pad}"
-
-
-    def _item_label(key, lock_only, minutes, selected):
-        """Build the label portion of a menu item (no arrow, no box chars)."""
+        # ── option items: label left, bracket right ──
         if key == 'interval':
-            val = fmt_secs(minutes)
-            raw = f"[{val}]"
-            cb  = _cb(raw, f"{BOLD}{CYAN}" if selected else CYAN)
-            lbl = (f"{BOLD}{WHITE}Interval{RESET}{GRAY} (seconds){RESET}" if selected
+            lbl = (f"{BOLD}{WHITE}Interval{RESET} {GRAY}(seconds){RESET}" if selected
                    else f"{GRAY}Interval (seconds){RESET}")
-            return f"{cb} {lbl}"
+            val_raw = f"[{fmt_secs(minutes)}]"
+            cb  = f"{BOLD}{CYAN}{val_raw}{RESET}" if selected else f"{CYAN}{val_raw}{RESET}"
 
-        if key == 'lock_toggle':
-            if lock_only:
-                cb = _cb("[x]", f"{BOLD}{GREEN}" if selected else GREEN)
-            else:
-                cb = _cb("[ ]", DIM)
+        elif key == 'lock_toggle':
             lbl = (f"{BOLD}{WHITE}Lock screen only{RESET}" if selected
                    else f"{GRAY}Lock screen only{RESET}")
-            return f"{cb} {lbl}"
+            tick    = 'x' if lock_only else ' '
+            val_raw = f"[{tick}]"
+            if lock_only:
+                cb = f"{BOLD}{GREEN}{val_raw}{RESET}" if selected else f"{GREEN}{val_raw}{RESET}"
+            else:
+                cb = f"{DIM}{val_raw}{RESET}"
 
-        text = {'run': '▶ Start', 'stop': '■ Stop', 'quit': '✕ Quit'}[key]
-        return (f"{BOLD}{WHITE}{text}{RESET}" if selected
-                else f"{GRAY}{text}{RESET}")
+        elif key == 'schedule':
+            lbl = (f"{BOLD}{WHITE}Schedule{RESET}" if selected else f"{GRAY}Schedule{RESET}")
+            val_raw = f"[{fmt_schedule(cfg.get('start_time'), cfg.get('end_time'))}]"
+            cb  = f"{BOLD}{CYAN}{val_raw}{RESET}" if selected else f"{CYAN}{val_raw}{RESET}"
+
+        elif key == 'days':
+            lbl = (f"{BOLD}{WHITE}Active days{RESET}" if selected else f"{GRAY}Active days{RESET}")
+            val_raw = f"[{fmt_days(cfg.get('days'))}]"
+            cb  = f"{BOLD}{CYAN}{val_raw}{RESET}" if selected else f"{CYAN}{val_raw}{RESET}"
+
+        pad = ' ' * max(2, avail - vlen(lbl) - vlen(cb))
+        return f"{lbl}{pad}{cb}"
 
 
-    def draw(procs, lock_only, minutes, sel_idx, flash=None):
+    def draw(procs, lock_only, minutes, sel_idx, flash=None, cfg=None):
         """Full-screen redraw."""
         is_running = bool(procs)
         items      = ITEMS_RUNNING if is_running else ITEMS_NOT_RUNNING
@@ -309,8 +429,13 @@ if not _DAEMON_MODE:
             mode_str = "Lock screen only" if p['lock_only'] else "Always (ignore lock)"
             lines.append(f"  {'Status':<10}{green('● RUNNING')}")
             lines.append(f"  {'PID':<10}{WHITE}{p['pid']}{RESET}")
-            lines.append(f"  {'Param':<10}{WHITE}{fmt_param(p['param'])}{RESET}")
+            lines.append(f"  {'Interval':<10}{WHITE}{fmt_param(p['param'])}{RESET}")
             lines.append(f"  {'Mode':<10}{gray(mode_str)}")
+            sched_str = fmt_schedule(cfg.get('start_time') if cfg else None,
+                                     cfg.get('end_time')   if cfg else None)
+            days_str  = fmt_days(cfg.get('days') if cfg else None)
+            lines.append(f"  {'Schedule':<10}{gray(sched_str)}")
+            lines.append(f"  {'Days':<10}{gray(days_str)}")
             if len(procs) > 1:
                 lines.append(f"  {yellow(f'⚠  {len(procs)} instances running')}")
         else:
@@ -325,7 +450,9 @@ if not _DAEMON_MODE:
         def _row(i, key):
             sel     = (i == sel_idx)
             arrow   = f"{GREEN}›{RESET}" if sel else ' '
-            label   = _item_label(key, lock_only, minutes, sel)
+            # prefix "  {arrow} " = 4 visual chars; leave 2 chars margin inside border
+            avail   = W - 4 - 2
+            label   = _item_label(key, lock_only, minutes, sel, cfg, avail)
             content = f"  {arrow} {label}"
             return f"  {GRAY}│{RESET}{rpad(content, W)}{GRAY}│{RESET}"
 
@@ -341,7 +468,7 @@ if not _DAEMON_MODE:
         lines.append(f"  {DIM}options{RESET}")
         lines.append(f"  {GRAY}┌{'─' * W}┐{RESET}")
         for i, key in enumerate(items):
-            if key in ('interval', 'lock_toggle'):
+            if key in ('interval', 'lock_toggle', 'schedule', 'days'):
                 lines.append(_row(i, key))
         lines.append(f"  {GRAY}└{'─' * W}┘{RESET}")
         lines.append("")
@@ -381,7 +508,9 @@ if not _DAEMON_MODE:
                         ch3 = _rd(fd)
                         if ch3 == 'A': return 'UP'
                         if ch3 == 'B': return 'DOWN'
-                        return 'IGNORE'  # left, right, or other escape sequences
+                        if ch3 == 'C': return 'RIGHT'
+                        if ch3 == 'D': return 'LEFT'
+                        return 'IGNORE'  # other escape sequences
                 return 'ESC'
             if ch in ('\r', '\n'):     return 'ENTER'
             if ch == ' ':              return 'SPACE'
@@ -392,43 +521,194 @@ if not _DAEMON_MODE:
 
 
     def edit_interval(current):
-        """Prompt for a new interval value. Returns (minutes, cancelled)."""
-        sys.stdout.write(SHOW_CURSOR)
-        sys.stdout.write("\033[2J\033[H")
+        """Spinbox interval editor. Returns (minutes, cancelled)."""
+        secs = max(1, round(current * 60))
+
+        def _draw():
+            sys.stdout.write("\033[2J\033[H")
+            print()
+            for logo_line in LOGO:
+                print(f"  {CYAN}{logo_line}{RESET}")
+            print()
+            print(f"  {DIM}interval{RESET}")
+            W = 54
+            print(f"  {GRAY}┌{'─' * W}┐{RESET}")
+            print(f"  {GRAY}│{RESET}{' ' * W}{GRAY}│{RESET}")
+
+            val_str = f"[ {secs} sec ]"
+            val_col = f"{BOLD}{CYAN}{val_str}{RESET}"
+            pad_l   = (W - len(val_str)) // 2
+            row     = ' ' * pad_l + val_col
+            print(f"  {GRAY}│{RESET}{rpad(row, W)}{GRAY}│{RESET}")
+            print(f"  {GRAY}│{RESET}{' ' * W}{GRAY}│{RESET}")
+
+            hint = f"   {GRAY}↑↓ ±1 sec   ←→ ±10 sec   Enter save   Esc cancel{RESET}"
+            print(f"  {GRAY}│{RESET}{rpad(hint, W)}{GRAY}│{RESET}")
+            print(f"  {GRAY}└{'─' * W}┘{RESET}")
+            sys.stdout.flush()
+
+        sys.stdout.write(HIDE_CURSOR)
         sys.stdout.flush()
+        while True:
+            _draw()
+            key = read_key()
+            if key == 'UP':
+                secs = min(secs + 1, 3600)
+            elif key == 'DOWN':
+                secs = max(secs - 1, 1)
+            elif key == 'RIGHT':
+                secs = min(secs + 10, 3600)
+            elif key == 'LEFT':
+                secs = max(secs - 10, 1)
+            elif key == 'ENTER':
+                return secs / 60, False
+            elif key in ('ESC', 'q', 'Q', 'QUIT'):
+                return current, True
 
-        for logo_line in LOGO:
-            print(f"  {CYAN}{logo_line}{RESET}")
-        print()
-        secs = current * 60
-        print(f"  Current  {CYAN}[{secs:g} sec]{RESET}")
-        print()
-        print(f"  New interval {gray('(seconds, e.g. 60  →  press Enter to keep current)')}")
-        print(f"  → ", end='', flush=True)
 
-        try:
-            raw = input().strip()
-        except (EOFError, KeyboardInterrupt):
-            return current, True
+    def edit_schedule(start_time, end_time):
+        """Spinbox time-range picker. Returns (start_str, end_str, cancelled)."""
+        # Parse into [sh, sm, eh, em]
+        def _parse(s):
+            if s:
+                try:
+                    h, m = s.split(':')
+                    return int(h), int(m)
+                except Exception:
+                    pass
+            return 9, 0
 
-        if not raw:
-            return current, True  # no change, treat as cancel so we don't flash
-        try:
-            val = float(raw)
-            if val <= 0:
-                raise ValueError
-            return val / 60, False
-        except ValueError:
-            return current, False
+        sh, sm = _parse(start_time)
+        eh, em = _parse(end_time)
+        fields = [sh, sm, eh, em]   # 0=start-h 1=start-m 2=end-h 3=end-m
+        fi     = 0                   # focused field index
+
+        FIELD_MAX = [23, 59, 23, 59]
+
+        def _draw():
+            def _fld(idx):
+                val = f"{fields[idx]:02d}"
+                if idx == fi:
+                    return f"{BOLD}{CYAN}[ {val} ]{RESET}"
+                return f"{GRAY}[ {val} ]{RESET}"
+
+            sys.stdout.write("\033[2J\033[H")
+            print()
+            for logo_line in LOGO:
+                print(f"  {CYAN}{logo_line}{RESET}")
+            print()
+            print(f"  {DIM}schedule{RESET}")
+            W = 54
+            print(f"  {GRAY}┌{'─' * W}┐{RESET}")
+            print(f"  {GRAY}│{RESET}{' ' * W}{GRAY}│{RESET}")
+
+            s_row = f"   {WHITE}Start{RESET}   {_fld(0)} {GRAY}:{RESET} {_fld(1)}"
+            e_row = f"   {WHITE}End  {RESET}   {_fld(2)} {GRAY}:{RESET} {_fld(3)}"
+            print(f"  {GRAY}│{RESET}{rpad(s_row, W)}{GRAY}│{RESET}")
+            print(f"  {GRAY}│{RESET}{rpad(e_row, W)}{GRAY}│{RESET}")
+            print(f"  {GRAY}│{RESET}{' ' * W}{GRAY}│{RESET}")
+
+            hint = f"   {GRAY}↑↓ adjust  Tab next field  Enter save  Esc cancel{RESET}"
+            print(f"  {GRAY}│{RESET}{rpad(hint, W)}{GRAY}│{RESET}")
+            print(f"  {GRAY}└{'─' * W}┘{RESET}")
+            sys.stdout.flush()
+
+        sys.stdout.write(HIDE_CURSOR)
+        while True:
+            _draw()
+            key = read_key()
+            if key == 'UP':
+                fields[fi] = (fields[fi] + 1) % (FIELD_MAX[fi] + 1)
+            elif key == 'DOWN':
+                fields[fi] = (fields[fi] - 1) % (FIELD_MAX[fi] + 1)
+            elif key in ('\t', 'RIGHT'):
+                fi = (fi + 1) % 4
+            elif key == 'LEFT':
+                fi = (fi - 1) % 4
+            elif key == 'ENTER':
+                s = f"{fields[0]:02d}:{fields[1]:02d}"
+                e = f"{fields[2]:02d}:{fields[3]:02d}"
+                return s, e, False
+            elif key in ('ESC', 'q', 'Q', 'QUIT'):
+                return start_time, end_time, True
+
+
+    def edit_days(days):
+        """Day-of-week multi-selector. Returns (days_list_or_none, cancelled)."""
+        selected = set(days) if days is not None else set(range(7))
+        fi       = 0   # focused day index (0-6)
+
+        def _draw():
+            sys.stdout.write("\033[2J\033[H")
+            print()
+            for logo_line in LOGO:
+                print(f"  {CYAN}{logo_line}{RESET}")
+            print()
+            print(f"  {DIM}active days{RESET}")
+            W = 54
+            print(f"  {GRAY}┌{'─' * W}┐{RESET}")
+            print(f"  {GRAY}│{RESET}{' ' * W}{GRAY}│{RESET}")
+
+            cells = []
+            for d in range(7):
+                tick = 'x' if d in selected else ' '
+                name = DAY_NAMES[d]
+                if d == fi:
+                    cell = f"{BOLD}{CYAN}[{tick}] {name}{RESET}"
+                elif d in selected:
+                    cell = f"{GREEN}[{tick}]{RESET} {GRAY}{name}{RESET}"
+                else:
+                    cell = f"{DIM}[{tick}] {name}{RESET}"
+                cells.append(cell)
+
+            row1 = "   " + "  ".join(cells[:4])
+            row2 = "   " + "  ".join(cells[4:])
+            print(f"  {GRAY}│{RESET}{rpad(row1, W)}{GRAY}│{RESET}")
+            print(f"  {GRAY}│{RESET}{rpad(row2, W)}{GRAY}│{RESET}")
+            print(f"  {GRAY}│{RESET}{' ' * W}{GRAY}│{RESET}")
+
+            hint = f"   {GRAY}← → navigate  Space toggle  Enter save  Esc cancel{RESET}"
+            print(f"  {GRAY}│{RESET}{rpad(hint, W)}{GRAY}│{RESET}")
+            print(f"  {GRAY}└{'─' * W}┘{RESET}")
+            sys.stdout.flush()
+
+        sys.stdout.write(HIDE_CURSOR)
+        while True:
+            _draw()
+            key = read_key()
+            if key == 'RIGHT':
+                fi = (fi + 1) % 7
+            elif key == 'LEFT':
+                fi = (fi - 1) % 7
+            elif key == 'DOWN':
+                fi = min(fi + 4, 6) if fi < 4 else fi - 4
+            elif key == 'UP':
+                fi = fi - 4 if fi >= 4 else min(fi + 4, 6)
+            elif key == 'SPACE':
+                if fi in selected:
+                    selected.discard(fi)
+                else:
+                    selected.add(fi)
+            elif key == 'ENTER':
+                result = sorted(selected) if len(selected) < 7 else None
+                return result, False
+            elif key in ('ESC', 'q', 'Q', 'QUIT'):
+                return days, True
 
 
     # ── actions ────────────────────────────────────────────────────────────────
 
-    def launch_mm(minutes, lock_only):
+    def launch_mm(minutes, lock_only, cfg=None):
         """Launch mm.py in background. Returns (ok: bool, pid_or_msg)."""
+        if cfg is None:
+            cfg = {}
         args = [sys.executable, SCRIPT_SELF, '--daemon', str(minutes)]
         if not lock_only:
             args.append('--always')
+        if cfg.get('start_time') and cfg.get('end_time'):
+            args += ['--start', cfg['start_time'], '--end', cfg['end_time']]
+        if cfg.get('days') is not None:
+            args += ['--days', ','.join(str(d) for d in cfg['days'])]
         try:
             with open(LOG_FILE, 'a') as log:
                 proc = subprocess.Popen(
@@ -478,13 +758,13 @@ if not _DAEMON_MODE:
         return _restarting.is_set() or _starting.is_set() or _stopping.is_set()
 
 
-    def _start_async(minutes, lock_only):
+    def _start_async(minutes, lock_only, cfg=None):
         if _busy():
             return
         def _worker():
             _starting.set()
             try:
-                launch_mm(minutes, lock_only)
+                launch_mm(minutes, lock_only, cfg)
             finally:
                 _starting.clear()
         threading.Thread(target=_worker, daemon=True).start()
@@ -502,14 +782,14 @@ if not _DAEMON_MODE:
         threading.Thread(target=_worker, daemon=True).start()
 
 
-    def _restart_if_running(procs, minutes, lock_only):
+    def _restart_if_running(procs, minutes, lock_only, cfg=None):
         if not procs or _busy():
             return
         def _worker():
             _restarting.set()
             try:
                 stop_mm(procs)
-                launch_mm(minutes, lock_only)
+                launch_mm(minutes, lock_only, cfg)
             finally:
                 _restarting.clear()
         threading.Thread(target=_worker, daemon=True).start()
@@ -519,8 +799,11 @@ if not _DAEMON_MODE:
 
     def _manager_main():
         _initial  = find_mm_processes()
-        lock_only = _initial[0]['lock_only'] if _initial else False
-        minutes   = _initial[0]['param']    if _initial else DEFAULT_MINUTES
+        cfg       = load_config()
+        lock_only = _initial[0]['lock_only'] if _initial else (
+                        cfg['lock_only'] if cfg['lock_only'] is not None else False)
+        minutes   = _initial[0]['param']    if _initial else (
+                        cfg['interval']  if cfg['interval']  is not None else DEFAULT_MINUTES)
         sel_idx   = 0
         flash     = None
 
@@ -537,7 +820,7 @@ if not _DAEMON_MODE:
                 active_flash = flash
                 flash = None
 
-                draw(procs, lock_only, minutes, sel_idx, active_flash)
+                draw(procs, lock_only, minutes, sel_idx, active_flash, cfg)
 
                 timeout = 0.15 if _busy() else None
                 key = read_key(timeout=timeout)
@@ -561,7 +844,9 @@ if not _DAEMON_MODE:
 
                     elif action == 'lock_toggle':
                         lock_only = not lock_only
-                        _restart_if_running(procs, minutes, lock_only)
+                        cfg['lock_only'] = lock_only
+                        save_config(cfg)
+                        _restart_if_running(procs, minutes, lock_only, cfg)
 
                     elif action == 'interval':
                         new_minutes, cancelled = edit_interval(minutes)
@@ -569,10 +854,33 @@ if not _DAEMON_MODE:
                         sys.stdout.flush()
                         if not cancelled:
                             minutes = new_minutes
-                            _restart_if_running(procs, minutes, lock_only)
+                            cfg['interval'] = minutes
+                            save_config(cfg)
+                            _restart_if_running(procs, minutes, lock_only, cfg)
+
+                    elif action == 'schedule':
+                        new_start, new_end, cancelled = edit_schedule(
+                            cfg.get('start_time'), cfg.get('end_time')
+                        )
+                        sys.stdout.write(HIDE_CURSOR)
+                        sys.stdout.flush()
+                        if not cancelled:
+                            cfg['start_time'] = new_start
+                            cfg['end_time']   = new_end
+                            save_config(cfg)
+                            _restart_if_running(procs, minutes, lock_only, cfg)
+
+                    elif action == 'days':
+                        new_days, cancelled = edit_days(cfg.get('days'))
+                        sys.stdout.write(HIDE_CURSOR)
+                        sys.stdout.flush()
+                        if not cancelled:
+                            cfg['days'] = new_days
+                            save_config(cfg)
+                            _restart_if_running(procs, minutes, lock_only, cfg)
 
                     elif action == 'run':
-                        _start_async(minutes, lock_only)
+                        _start_async(minutes, lock_only, cfg)
 
                     elif action == 'stop':
                         _stop_async(procs)
