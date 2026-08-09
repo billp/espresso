@@ -47,10 +47,12 @@ Navigate with `↑ ↓`, select with `Enter`, quit with `q`.
 
 | Option | Default | Description |
 |---|---|---|
-| Interval | 12 sec | How often the mouse nudges (↑↓ ±1 s, ←→ ±10 s) |
+| Interval | 12 sec | Idle time before the mouse nudges (↑↓ ±1 s, ←→ ±10 s) |
 | Lock screen only | off | Only move the mouse when the screen is locked |
 | Schedule | always | Active time window (e.g. 09:00→18:00) |
 | Active days | all | Days of the week the daemon is allowed to run |
+
+The interval is an idle timer: any real mouse or keyboard input restarts it, so espresso never fights you for the cursor. If you grab the mouse mid-nudge, the cycle is abandoned and the cursor stays where you put it.
 
 All settings persist to `~/.config/espresso/config.json` and are restored on next launch. Changing any option while the daemon is running restarts it automatically.
 

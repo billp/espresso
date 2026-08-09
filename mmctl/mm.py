@@ -2,11 +2,15 @@
 """
 mm.py — Mouse mover daemon. Managed by mmctl.py.
 Args: [minutes] [--always] [--start HH:MM] [--end HH:MM] [--days 0,1,2,3,4]
-  minutes    : interval between cycles (default 0.2)
+  minutes    : idle time required before a cycle (default 0.2)
   --always   : move mouse even when screen is not locked
   --start    : start of active time window (24h HH:MM)
   --end      : end of active time window (24h HH:MM)
   --days     : comma-separated weekday numbers (0=Mon … 6=Sun)
+
+The interval is an idle timer: any real user input (mouse or keyboard)
+restarts it, and a cycle already in progress is abandoned the moment the
+cursor moves on its own.
 """
 import ctypes, sys, time, random, subprocess
 from datetime import datetime
@@ -52,9 +56,20 @@ _cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
 _cg.CFRelease.restype = None
 _cg.CFRelease.argtypes = [ctypes.c_void_p]
 
+try:
+    _cg.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
+    _cg.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+except AttributeError:  # not available — fall back to cursor tracking alone
+    _cg.CGEventSourceSecondsSinceLastEventType = None
+
 kCGEventMouseMoved = 5
 kCGHIDEventTap = 0
 kCGMouseButtonLeft = 0
+kCGEventSourceStateHIDSystemState = 1
+kCGAnyInputEventType = 0xFFFFFFFF
+
+# Cursor jumps smaller than this are treated as rounding noise, not the user.
+MOVE_EPSILON = 2.0
 
 
 def is_locked():
@@ -104,6 +119,39 @@ def move_mouse(x, y):
     _cg.CFRelease(evt)
 
 
+def seconds_since_input():
+    """Seconds since the last HID input event, or None if unavailable."""
+    if _cg.CGEventSourceSecondsSinceLastEventType is None:
+        return None
+    try:
+        return _cg.CGEventSourceSecondsSinceLastEventType(
+            kCGEventSourceStateHIDSystemState, kCGAnyInputEventType)
+    except Exception:
+        return None
+
+
+def moved(a, b):
+    return abs(a.x - b.x) > MOVE_EPSILON or abs(a.y - b.y) > MOVE_EPSILON
+
+
+def jiggle(origin, width, height):
+    """Nudge the cursor and put it back. Returns False if the user took over."""
+    last = origin
+    for _ in range(10):
+        if moved(get_mouse_pos(), last):
+            return False
+        nx = max(0.0, min(width - 1, origin.x + random.uniform(-5.0, 5.0)))
+        ny = max(0.0, min(height - 1, origin.y + random.uniform(-5.0, 5.0)))
+        move_mouse(nx, ny)
+        last = CGPoint(nx, ny)
+        time.sleep(0.05)
+
+    if moved(get_mouse_pos(), last):
+        return False
+    move_mouse(origin.x, origin.y)
+    return True
+
+
 def main():
     minutes      = 0.2
     always_mode  = False
@@ -141,26 +189,41 @@ def main():
     width    = bounds.size.width
     height   = bounds.size.height
     interval = minutes * 60
+    poll     = min(5.0, max(1.0, interval / 4.0))
+
+    resting  = get_mouse_pos()      # where the cursor was left after the last cycle
+    deadline = time.monotonic() + interval
 
     while True:
+        time.sleep(poll)
+        now = time.monotonic()
+
+        cur = get_mouse_pos()
+        if moved(cur, resting):     # the user is driving — start the wait over
+            resting  = cur
+            deadline = now + interval
+            continue
+        resting = cur
+
+        idle = seconds_since_input()
+        if idle is not None and idle < interval:
+            deadline = max(deadline, now + (interval - idle))
+
+        if now < deadline:
+            continue
+
+        # only worth the ioreg call once the idle timer has actually run out
         if not always_mode and not is_locked():
-            time.sleep(interval)
+            deadline = now + interval
             continue
 
         if not is_within_schedule(start_hm, end_hm, allowed_days):
-            time.sleep(interval)
+            deadline = now + interval
             continue
 
-        cur = get_mouse_pos()
-
-        for _ in range(10):
-            nx = max(0.0, min(width - 1, cur.x + random.uniform(-5.0, 5.0)))
-            ny = max(0.0, min(height - 1, cur.y + random.uniform(-5.0, 5.0)))
-            move_mouse(nx, ny)
-            time.sleep(0.05)
-
-        move_mouse(cur.x, cur.y)
-        time.sleep(interval)
+        jiggle(get_mouse_pos(), width, height)
+        resting  = get_mouse_pos()
+        deadline = time.monotonic() + interval
 
 
 if __name__ == '__main__':

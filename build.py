@@ -222,11 +222,15 @@ cat > "${DEST}" << \'END_OF_SCRIPT\'
 
 PYTHON_PREAMBLE = '''\
 #!/usr/bin/env python3
-"""espresso — Mouse Mover. No args: TUI manager. --daemon [minutes] [--always]: background process."""
+"""espresso — Mouse Mover.
+No args: TUI manager.  --daemon [minutes] [--always]: background process.
+--ensure: start daemon with saved settings if not running (watchdog).
+--install-agent / --uninstall-agent: manage the auto-restart LaunchAgent."""
 __version__ = "{version}"
 import os, sys, ctypes, time, random, subprocess, signal
 
 _DAEMON_MODE = '--daemon' in sys.argv
+_ENSURE_MODE = '--ensure' in sys.argv
 if _DAEMON_MODE:
     sys.argv = [a for a in sys.argv if a != '--daemon']
 
@@ -251,6 +255,16 @@ PYTHON_ENTRYPOINT = '''\
 if __name__ == '__main__':
     if _DAEMON_MODE:
         _daemon_main()
+    elif _ENSURE_MODE:
+        ensure_running()
+    elif '--install-agent' in sys.argv:
+        ok, msg = install_agent()
+        print(('✓ ' if ok else '✗ ') + msg)
+        sys.exit(0 if ok else 1)
+    elif '--uninstall-agent' in sys.argv:
+        ok, msg = uninstall_agent()
+        print(('✓ ' if ok else '✗ ') + msg)
+        sys.exit(0 if ok else 1)
     else:
         _manager_main()
 '''
