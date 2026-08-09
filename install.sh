@@ -4,7 +4,7 @@ set -euo pipefail
 INSTALL_DIR="${HOME}/.local/bin"
 SCRIPT_NAME="espresso"
 DEST="${INSTALL_DIR}/${SCRIPT_NAME}"
-VERSION="0.0.27"
+VERSION="0.0.31"
 
 mkdir -p "${INSTALL_DIR}"
 
@@ -19,11 +19,15 @@ fi
 
 cat > "${DEST}" << 'END_OF_SCRIPT'
 #!/usr/bin/env python3
-"""espresso — Mouse Mover. No args: TUI manager. --daemon [minutes] [--always]: background process."""
-__version__ = "0.0.27"
+"""espresso — Mouse Mover.
+No args: TUI manager.  --daemon [minutes] [--always]: background process.
+--ensure: start daemon with saved settings if not running (watchdog).
+--install-agent / --uninstall-agent: manage the auto-restart LaunchAgent."""
+__version__ = "0.0.31"
 import os, sys, ctypes, time, random, subprocess, signal
 
 _DAEMON_MODE = '--daemon' in sys.argv
+_ENSURE_MODE = '--ensure' in sys.argv
 if _DAEMON_MODE:
     sys.argv = [a for a in sys.argv if a != '--daemon']
 
@@ -73,9 +77,20 @@ _cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
 _cg.CFRelease.restype = None
 _cg.CFRelease.argtypes = [ctypes.c_void_p]
 
+try:
+    _cg.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
+    _cg.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+except AttributeError:  # not available — fall back to cursor tracking alone
+    _cg.CGEventSourceSecondsSinceLastEventType = None
+
 kCGEventMouseMoved = 5
 kCGHIDEventTap = 0
 kCGMouseButtonLeft = 0
+kCGEventSourceStateHIDSystemState = 1
+kCGAnyInputEventType = 0xFFFFFFFF
+
+# Cursor jumps smaller than this are treated as rounding noise, not the user.
+MOVE_EPSILON = 2.0
 
 
 def is_locked():
@@ -125,6 +140,39 @@ def move_mouse(x, y):
     _cg.CFRelease(evt)
 
 
+def seconds_since_input():
+    """Seconds since the last HID input event, or None if unavailable."""
+    if _cg.CGEventSourceSecondsSinceLastEventType is None:
+        return None
+    try:
+        return _cg.CGEventSourceSecondsSinceLastEventType(
+            kCGEventSourceStateHIDSystemState, kCGAnyInputEventType)
+    except Exception:
+        return None
+
+
+def moved(a, b):
+    return abs(a.x - b.x) > MOVE_EPSILON or abs(a.y - b.y) > MOVE_EPSILON
+
+
+def jiggle(origin, width, height):
+    """Nudge the cursor and put it back. Returns False if the user took over."""
+    last = origin
+    for _ in range(10):
+        if moved(get_mouse_pos(), last):
+            return False
+        nx = max(0.0, min(width - 1, origin.x + random.uniform(-5.0, 5.0)))
+        ny = max(0.0, min(height - 1, origin.y + random.uniform(-5.0, 5.0)))
+        move_mouse(nx, ny)
+        last = CGPoint(nx, ny)
+        time.sleep(0.05)
+
+    if moved(get_mouse_pos(), last):
+        return False
+    move_mouse(origin.x, origin.y)
+    return True
+
+
 def _daemon_main():
     minutes      = 0.2
     always_mode  = False
@@ -162,26 +210,41 @@ def _daemon_main():
     width    = bounds.size.width
     height   = bounds.size.height
     interval = minutes * 60
+    poll     = min(5.0, max(1.0, interval / 4.0))
+
+    resting  = get_mouse_pos()      # where the cursor was left after the last cycle
+    deadline = time.monotonic() + interval
 
     while True:
+        time.sleep(poll)
+        now = time.monotonic()
+
+        cur = get_mouse_pos()
+        if moved(cur, resting):     # the user is driving — start the wait over
+            resting  = cur
+            deadline = now + interval
+            continue
+        resting = cur
+
+        idle = seconds_since_input()
+        if idle is not None and idle < interval:
+            deadline = max(deadline, now + (interval - idle))
+
+        if now < deadline:
+            continue
+
+        # only worth the ioreg call once the idle timer has actually run out
         if not always_mode and not is_locked():
-            time.sleep(interval)
+            deadline = now + interval
             continue
 
         if not is_within_schedule(start_hm, end_hm, allowed_days):
-            time.sleep(interval)
+            deadline = now + interval
             continue
 
-        cur = get_mouse_pos()
-
-        for _ in range(10):
-            nx = max(0.0, min(width - 1, cur.x + random.uniform(-5.0, 5.0)))
-            ny = max(0.0, min(height - 1, cur.y + random.uniform(-5.0, 5.0)))
-            move_mouse(nx, ny)
-            time.sleep(0.05)
-
-        move_mouse(cur.x, cur.y)
-        time.sleep(interval)
+        jiggle(get_mouse_pos(), width, height)
+        resting  = get_mouse_pos()
+        deadline = time.monotonic() + interval
 
 
 # ── TUI manager ────────────────────────────────────────────────────────────
@@ -216,9 +279,12 @@ if not _DAEMON_MODE:
     SCRIPT_SELF     = os.path.abspath(sys.argv[0])
     SCRIPT_NAME     = os.path.basename(SCRIPT_SELF)
     CONFIG_PATH     = os.path.expanduser('~/.config/espresso/config.json')
+    AGENT_LABEL     = 'com.espresso.watchdog'
+    AGENT_PLIST     = os.path.expanduser('~/Library/LaunchAgents/com.espresso.watchdog.plist')
+    AGENT_LOG       = '/tmp/espresso-agent.log'
 
-    ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'lock_toggle', 'schedule', 'days']
-    ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'lock_toggle', 'schedule', 'days']
+    ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
+    ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
 
     DAY_NAMES = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
 
@@ -402,6 +468,17 @@ if not _DAEMON_MODE:
             val_raw = f"[{fmt_days(cfg.get('days'))}]"
             cb  = f"{BOLD}{CYAN}{val_raw}{RESET}" if selected else f"{CYAN}{val_raw}{RESET}"
 
+        elif key == 'watchdog':
+            lbl = (f"{BOLD}{WHITE}Watchdog{RESET} {GRAY}(auto-restart){RESET}" if selected
+                   else f"{GRAY}Watchdog (auto-restart){RESET}")
+            on      = agent_installed()
+            tick    = 'x' if on else ' '
+            val_raw = f"[{tick}]"
+            if on:
+                cb = f"{BOLD}{GREEN}{val_raw}{RESET}" if selected else f"{GREEN}{val_raw}{RESET}"
+            else:
+                cb = f"{DIM}{val_raw}{RESET}"
+
         pad = ' ' * max(2, avail - vlen(lbl) - vlen(cb))
         return f"{lbl}{pad}{cb}"
 
@@ -468,7 +545,7 @@ if not _DAEMON_MODE:
         lines.append(f"  {DIM}options{RESET}")
         lines.append(f"  {GRAY}┌{'─' * W}┐{RESET}")
         for i, key in enumerate(items):
-            if key in ('interval', 'lock_toggle', 'schedule', 'days'):
+            if key in ('interval', 'lock_toggle', 'schedule', 'days', 'watchdog'):
                 lines.append(_row(i, key))
         lines.append(f"  {GRAY}└{'─' * W}┘{RESET}")
         lines.append("")
@@ -749,6 +826,94 @@ if not _DAEMON_MODE:
         return '  '.join(parts) if parts else green('✓ stopped')
 
 
+    def ensure_running():
+        """Start the daemon with last-saved settings if it isn't already running.
+
+        Used by the watchdog LaunchAgent (`espresso --ensure`)."""
+        if find_mm_processes():
+            return
+        cfg       = load_config()
+        minutes   = cfg['interval']  if cfg['interval']  is not None else DEFAULT_MINUTES
+        lock_only = cfg['lock_only'] if cfg['lock_only'] is not None else False
+        launch_mm(minutes, lock_only, cfg)
+
+
+    # ── watchdog LaunchAgent ─────────────────────────────────────────────────────
+
+    def agent_installed():
+        """True if the watchdog LaunchAgent plist is present."""
+        return os.path.exists(AGENT_PLIST)
+
+
+    def _agent_plist_xml():
+        """Build the LaunchAgent plist that runs `espresso --ensure` every 60s."""
+        espresso = os.path.abspath(sys.argv[0])
+        py_dir   = os.path.dirname(os.path.abspath(sys.executable))
+        path_env = ':'.join([
+            os.path.expanduser('~/.local/bin'), py_dir,
+            '/opt/homebrew/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin',
+        ])
+        return f'''<?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>Label</key>
+        <string>{AGENT_LABEL}</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>{espresso}</string>
+            <string>--ensure</string>
+        </array>
+        <key>EnvironmentVariables</key>
+        <dict>
+            <key>PATH</key>
+            <string>{path_env}</string>
+        </dict>
+        <key>RunAtLoad</key>
+        <true/>
+        <key>StartInterval</key>
+        <integer>60</integer>
+        <key>StandardOutPath</key>
+        <string>{AGENT_LOG}</string>
+        <key>StandardErrorPath</key>
+        <string>{AGENT_LOG}</string>
+    </dict>
+    </plist>
+    '''
+
+
+    def install_agent():
+        """Write and load the watchdog LaunchAgent. Returns (ok, msg)."""
+        try:
+            os.makedirs(os.path.dirname(AGENT_PLIST), exist_ok=True)
+            with open(AGENT_PLIST, 'w') as f:
+                f.write(_agent_plist_xml())
+            uid    = os.getuid()
+            target = f'gui/{uid}/{AGENT_LABEL}'
+            subprocess.run(['launchctl', 'bootout', target], capture_output=True, text=True)
+            r = subprocess.run(['launchctl', 'bootstrap', f'gui/{uid}', AGENT_PLIST],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                return False, (r.stderr.strip() or 'bootstrap failed')
+            subprocess.run(['launchctl', 'enable', target], capture_output=True, text=True)
+            return True, 'watchdog installed'
+        except Exception as e:
+            return False, str(e)
+
+
+    def uninstall_agent():
+        """Unload and remove the watchdog LaunchAgent. Returns (ok, msg)."""
+        try:
+            uid    = os.getuid()
+            subprocess.run(['launchctl', 'bootout', f'gui/{uid}/{AGENT_LABEL}'],
+                           capture_output=True, text=True)
+            if os.path.exists(AGENT_PLIST):
+                os.remove(AGENT_PLIST)
+            return True, 'watchdog removed'
+        except Exception as e:
+            return False, str(e)
+
+
     _restarting = threading.Event()
     _starting   = threading.Event()
     _stopping   = threading.Event()
@@ -879,6 +1044,13 @@ if not _DAEMON_MODE:
                             save_config(cfg)
                             _restart_if_running(procs, minutes, lock_only, cfg)
 
+                    elif action == 'watchdog':
+                        if agent_installed():
+                            ok, msg = uninstall_agent()
+                        else:
+                            ok, msg = install_agent()
+                        flash = green(f'✓ {msg}') if ok else red(f'✗ {msg}')
+
                     elif action == 'run':
                         _start_async(minutes, lock_only, cfg)
 
@@ -899,6 +1071,16 @@ if not _DAEMON_MODE:
 if __name__ == '__main__':
     if _DAEMON_MODE:
         _daemon_main()
+    elif _ENSURE_MODE:
+        ensure_running()
+    elif '--install-agent' in sys.argv:
+        ok, msg = install_agent()
+        print(('✓ ' if ok else '✗ ') + msg)
+        sys.exit(0 if ok else 1)
+    elif '--uninstall-agent' in sys.argv:
+        ok, msg = uninstall_agent()
+        print(('✓ ' if ok else '✗ ') + msg)
+        sys.exit(0 if ok else 1)
     else:
         _manager_main()
 END_OF_SCRIPT
