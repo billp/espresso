@@ -32,9 +32,12 @@ MM_PY           = os.path.join(SCRIPT_DIR, 'mm.py')
 LOG_FILE        = '/tmp/mm.log'
 DEFAULT_MINUTES = 0.2
 CONFIG_PATH     = os.path.expanduser('~/.config/espresso/config.json')
+AGENT_LABEL     = 'com.espresso.watchdog'
+AGENT_PLIST     = os.path.expanduser('~/Library/LaunchAgents/com.espresso.watchdog.plist')
+AGENT_LOG       = '/tmp/espresso-agent.log'
 
-ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'lock_toggle', 'schedule', 'days']
-ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'lock_toggle', 'schedule', 'days']
+ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
+ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
 
 DAY_NAMES = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
 
@@ -216,6 +219,17 @@ def _item_label(key, lock_only, minutes, selected, cfg=None, avail=42):
         val_raw = f"[{fmt_days(cfg.get('days'))}]"
         cb  = f"{BOLD}{CYAN}{val_raw}{RESET}" if selected else f"{CYAN}{val_raw}{RESET}"
 
+    elif key == 'watchdog':
+        lbl = (f"{BOLD}{WHITE}Watchdog{RESET} {GRAY}(auto-restart){RESET}" if selected
+               else f"{GRAY}Watchdog (auto-restart){RESET}")
+        on      = agent_installed()
+        tick    = 'x' if on else ' '
+        val_raw = f"[{tick}]"
+        if on:
+            cb = f"{BOLD}{GREEN}{val_raw}{RESET}" if selected else f"{GREEN}{val_raw}{RESET}"
+        else:
+            cb = f"{DIM}{val_raw}{RESET}"
+
     pad = ' ' * max(2, avail - vlen(lbl) - vlen(cb))
     return f"{lbl}{pad}{cb}"
 
@@ -282,7 +296,7 @@ def draw(procs, lock_only, minutes, sel_idx, flash=None, cfg=None):
     lines.append(f"  {DIM}options{RESET}")
     lines.append(f"  {GRAY}┌{'─' * W}┐{RESET}")
     for i, key in enumerate(items):
-        if key in ('interval', 'lock_toggle', 'schedule', 'days'):
+        if key in ('interval', 'lock_toggle', 'schedule', 'days', 'watchdog'):
             lines.append(_row(i, key))
     lines.append(f"  {GRAY}└{'─' * W}┘{RESET}")
     lines.append("")
@@ -563,6 +577,94 @@ def stop_mm(procs):
     return '  '.join(parts) if parts else green('✓ stopped')
 
 
+def ensure_running():
+    """Start the daemon with last-saved settings if it isn't already running.
+
+    Used by the watchdog LaunchAgent (`espresso --ensure`)."""
+    if find_mm_processes():
+        return
+    cfg       = load_config()
+    minutes   = cfg['interval']  if cfg['interval']  is not None else DEFAULT_MINUTES
+    lock_only = cfg['lock_only'] if cfg['lock_only'] is not None else False
+    launch_mm(minutes, lock_only, cfg)
+
+
+# ── watchdog LaunchAgent ─────────────────────────────────────────────────────
+
+def agent_installed():
+    """True if the watchdog LaunchAgent plist is present."""
+    return os.path.exists(AGENT_PLIST)
+
+
+def _agent_plist_xml():
+    """Build the LaunchAgent plist that runs `espresso --ensure` every 60s."""
+    espresso = os.path.abspath(sys.argv[0])
+    py_dir   = os.path.dirname(os.path.abspath(sys.executable))
+    path_env = ':'.join([
+        os.path.expanduser('~/.local/bin'), py_dir,
+        '/opt/homebrew/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin',
+    ])
+    return f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{AGENT_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{espresso}</string>
+        <string>--ensure</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{path_env}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>{AGENT_LOG}</string>
+    <key>StandardErrorPath</key>
+    <string>{AGENT_LOG}</string>
+</dict>
+</plist>
+'''
+
+
+def install_agent():
+    """Write and load the watchdog LaunchAgent. Returns (ok, msg)."""
+    try:
+        os.makedirs(os.path.dirname(AGENT_PLIST), exist_ok=True)
+        with open(AGENT_PLIST, 'w') as f:
+            f.write(_agent_plist_xml())
+        uid    = os.getuid()
+        target = f'gui/{uid}/{AGENT_LABEL}'
+        subprocess.run(['launchctl', 'bootout', target], capture_output=True, text=True)
+        r = subprocess.run(['launchctl', 'bootstrap', f'gui/{uid}', AGENT_PLIST],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return False, (r.stderr.strip() or 'bootstrap failed')
+        subprocess.run(['launchctl', 'enable', target], capture_output=True, text=True)
+        return True, 'watchdog installed'
+    except Exception as e:
+        return False, str(e)
+
+
+def uninstall_agent():
+    """Unload and remove the watchdog LaunchAgent. Returns (ok, msg)."""
+    try:
+        uid    = os.getuid()
+        subprocess.run(['launchctl', 'bootout', f'gui/{uid}/{AGENT_LABEL}'],
+                       capture_output=True, text=True)
+        if os.path.exists(AGENT_PLIST):
+            os.remove(AGENT_PLIST)
+        return True, 'watchdog removed'
+    except Exception as e:
+        return False, str(e)
+
+
 _restarting = threading.Event()
 _starting   = threading.Event()
 _stopping   = threading.Event()
@@ -693,6 +795,13 @@ def main():
                         save_config(cfg)
                         _restart_if_running(procs, minutes, lock_only, cfg)
 
+                elif action == 'watchdog':
+                    if agent_installed():
+                        ok, msg = uninstall_agent()
+                    else:
+                        ok, msg = install_agent()
+                    flash = green(f'✓ {msg}') if ok else red(f'✗ {msg}')
+
                 elif action == 'run':
                     _start_async(minutes, lock_only, cfg)
 
@@ -711,4 +820,15 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if '--ensure' in sys.argv:
+        ensure_running()
+    elif '--install-agent' in sys.argv:
+        ok, msg = install_agent()
+        print(('✓ ' if ok else '✗ ') + msg)
+        sys.exit(0 if ok else 1)
+    elif '--uninstall-agent' in sys.argv:
+        ok, msg = uninstall_agent()
+        print(('✓ ' if ok else '✗ ') + msg)
+        sys.exit(0 if ok else 1)
+    else:
+        main()
