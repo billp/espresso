@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 mm.py — Mouse mover daemon. Managed by mmctl.py.
-Args: [minutes] [--always] [--start HH:MM] [--end HH:MM] [--days 0,1,2,3,4]
-  minutes    : idle time required before a cycle (default 0.2)
+Args: [minutes] [--locked MIN] [--always] [--start HH:MM] [--end HH:MM] [--days 0,1,2,3,4]
+  minutes    : idle time required before a cycle while unlocked (default 0.2)
+  --locked   : idle time required before a cycle while locked (default: minutes)
   --always   : move mouse even when screen is not locked
   --start    : start of active time window (24h HH:MM)
   --end      : end of active time window (24h HH:MM)
@@ -154,6 +155,7 @@ def jiggle(origin, width, height):
 
 def main():
     minutes      = 0.2
+    locked_min   = None
     always_mode  = False
     start_hm     = None
     end_hm       = None
@@ -165,6 +167,12 @@ def main():
         a = args[i]
         if a == '--always':
             always_mode = True
+        elif a == '--locked' and i + 1 < len(args):
+            i += 1
+            try:
+                locked_min = float(args[i])
+            except ValueError:
+                pass
         elif a == '--start' and i + 1 < len(args):
             i += 1
             start_hm = _parse_hhmm(args[i])
@@ -188,11 +196,16 @@ def main():
     bounds   = _cg.CGDisplayBounds(display)
     width    = bounds.size.width
     height   = bounds.size.height
-    interval = minutes * 60
-    poll     = min(5.0, max(1.0, interval / 4.0))
+    unlocked_interval = minutes * 60
+    locked_interval   = (locked_min if locked_min is not None else minutes) * 60
+    # lock state is only known after an ioreg call, so wait out the shorter
+    # of the intervals that can apply before asking
+    shortest = locked_interval if not always_mode else min(locked_interval, unlocked_interval)
+    poll     = min(5.0, max(1.0, shortest / 4.0))
 
-    resting  = get_mouse_pos()      # where the cursor was left after the last cycle
-    deadline = time.monotonic() + interval
+    resting    = get_mouse_pos()    # where the cursor was left after the last cycle
+    idle_since = time.monotonic()   # last user input or nudge
+    next_check = idle_since + shortest
 
     while True:
         time.sleep(poll)
@@ -200,31 +213,41 @@ def main():
 
         cur = get_mouse_pos()
         if moved(cur, resting):     # the user is driving — start the wait over
-            resting  = cur
-            deadline = now + interval
+            resting    = cur
+            idle_since = now
+            next_check = now + shortest
             continue
         resting = cur
 
         idle = seconds_since_input()
-        if idle is not None and idle < interval:
-            deadline = max(deadline, now + (interval - idle))
+        if idle is not None:
+            idle_since = max(idle_since, now - idle)
+        next_check = max(next_check, idle_since + shortest)
 
-        if now < deadline:
+        if now < next_check:
             continue
 
         # only worth the ioreg call once the idle timer has actually run out
-        if not always_mode and not is_locked():
-            deadline = now + interval
+        if is_locked():
+            interval = locked_interval
+        elif always_mode:
+            interval = unlocked_interval
+        else:
+            next_check = now + shortest
+            continue
+
+        if now - idle_since < interval:
+            next_check = min(now + shortest, idle_since + interval)
             continue
 
         if not is_within_schedule(start_hm, end_hm, allowed_days):
-            deadline = now + interval
+            next_check = now + shortest
             continue
 
         jiggle(get_mouse_pos(), width, height)
-        resting  = get_mouse_pos()
-        deadline = time.monotonic() + interval
-
+        resting    = get_mouse_pos()
+        idle_since = time.monotonic()
+        next_check = idle_since + shortest
 
 if __name__ == '__main__':
     main()

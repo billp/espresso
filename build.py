@@ -85,6 +85,7 @@ def find_mm_processes():
             continue
 
         minutes    = DEFAULT_MINUTES
+        locked     = None
         lock_only  = True
         start_time = None
         end_time   = None
@@ -97,6 +98,12 @@ def find_mm_processes():
                 tok = rest[j]
                 if tok == '--always':
                     lock_only = False
+                elif tok == '--locked' and j + 1 < len(rest):
+                    j += 1
+                    try:
+                        locked = float(rest[j])
+                    except ValueError:
+                        pass
                 elif tok == '--start' and j + 1 < len(rest):
                     j += 1
                     start_time = rest[j]
@@ -119,7 +126,9 @@ def find_mm_processes():
             pass
 
         procs.append({
-            'pid': pid, 'param': minutes, 'lock_only': lock_only,
+            'pid': pid, 'param': minutes,
+            'locked_param': locked if locked is not None else minutes,
+            'lock_only': lock_only,
             'start_time': start_time, 'end_time': end_time, 'days': days,
         })
 
@@ -275,6 +284,17 @@ END_OF_SCRIPT
 chmod +x "${DEST}"
 
 echo "✓ Installed: ${DEST}"
+
+# ── stop a daemon still running the previous version ───────────────────────
+PIDS=$(pgrep -f -- "${DEST} --daemon" || true)
+if [ -n "${PIDS}" ]; then
+    kill ${PIDS} 2>/dev/null || true
+    if [ -f "${HOME}/Library/LaunchAgents/com.espresso.watchdog.plist" ]; then
+        echo "✓ Stopped old daemon (PID $(echo ${PIDS})) — watchdog will restart it within a minute"
+    else
+        echo "✓ Stopped old daemon (PID $(echo ${PIDS})) — start it again from espresso"
+    fi
+fi
 
 case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;

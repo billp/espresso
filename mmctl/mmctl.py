@@ -36,8 +36,8 @@ AGENT_LABEL     = 'com.espresso.watchdog'
 AGENT_PLIST     = os.path.expanduser('~/Library/LaunchAgents/com.espresso.watchdog.plist')
 AGENT_LOG       = '/tmp/espresso-agent.log'
 
-ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
-ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
+ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'locked_interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
+ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'locked_interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
 
 DAY_NAMES = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
 
@@ -55,6 +55,7 @@ def load_config():
         'end_time':   cfg.get('end_time'),
         'days':       cfg.get('days'),
         'interval':   cfg.get('interval'),
+        'locked_interval': cfg.get('locked_interval'),
         'lock_only':  cfg.get('lock_only'),
     }
 
@@ -95,6 +96,7 @@ def find_mm_processes():
             continue
 
         minutes    = DEFAULT_MINUTES
+        locked     = None
         lock_only  = True
         start_time = None
         end_time   = None
@@ -105,6 +107,12 @@ def find_mm_processes():
             tok = rest[j]
             if tok == '--always':
                 lock_only = False
+            elif tok == '--locked' and j + 1 < len(rest):
+                j += 1
+                try:
+                    locked = float(rest[j])
+                except ValueError:
+                    pass
             elif tok == '--start' and j + 1 < len(rest):
                 j += 1
                 start_time = rest[j]
@@ -133,7 +141,9 @@ def find_mm_processes():
             continue
 
         procs.append({
-            'pid': pid, 'param': minutes, 'lock_only': lock_only,
+            'pid': pid, 'param': minutes,
+            'locked_param': locked if locked is not None else minutes,
+            'lock_only': lock_only,
             'start_time': start_time, 'end_time': end_time, 'days': days,
         })
 
@@ -159,6 +169,12 @@ def fmt_param(minutes):
 
 def fmt_secs(minutes):
     return f"{minutes * 60:g}"
+
+
+def locked_minutes(cfg, minutes):
+    """Locked-screen interval; falls back to the unlocked one when unset."""
+    v = cfg.get('locked_interval') if cfg else None
+    return v if v is not None else minutes
 
 
 def fmt_schedule(start_time, end_time):
@@ -194,9 +210,18 @@ def _item_label(key, lock_only, minutes, selected, cfg=None, avail=42):
 
     # ── option items: label left, bracket right ──
     if key == 'interval':
-        lbl = (f"{BOLD}{WHITE}Interval{RESET} {GRAY}(seconds){RESET}" if selected
-               else f"{GRAY}Interval (seconds){RESET}")
+        lbl = (f"{BOLD}{WHITE}Interval unlocked{RESET} {GRAY}(sec){RESET}" if selected
+               else f"{GRAY}Interval unlocked (sec){RESET}")
         val_raw = f"[{fmt_secs(minutes)}]"
+        if lock_only:   # unused while lock-screen-only is on
+            cb = f"{DIM}{val_raw}{RESET}"
+        else:
+            cb = f"{BOLD}{CYAN}{val_raw}{RESET}" if selected else f"{CYAN}{val_raw}{RESET}"
+
+    elif key == 'locked_interval':
+        lbl = (f"{BOLD}{WHITE}Interval locked{RESET} {GRAY}(sec){RESET}" if selected
+               else f"{GRAY}Interval locked (sec){RESET}")
+        val_raw = f"[{fmt_secs(locked_minutes(cfg, minutes))}]"
         cb  = f"{BOLD}{CYAN}{val_raw}{RESET}" if selected else f"{CYAN}{val_raw}{RESET}"
 
     elif key == 'lock_toggle':
@@ -257,7 +282,12 @@ def draw(procs, lock_only, minutes, sel_idx, flash=None, cfg=None):
         mode_str = "Lock screen only" if p['lock_only'] else "Always (ignore lock)"
         lines.append(f"  {'Status':<10}{green('● RUNNING')}")
         lines.append(f"  {'PID':<10}{WHITE}{p['pid']}{RESET}")
-        lines.append(f"  {'Interval':<10}{WHITE}{fmt_param(p['param'])}{RESET}")
+        if p['lock_only']:
+            ivl_str = f"{fmt_param(p['locked_param'])} locked"
+        else:
+            ivl_str = (f"{fmt_param(p['param'])} unlocked · "
+                       f"{fmt_param(p['locked_param'])} locked")
+        lines.append(f"  {'Interval':<10}{WHITE}{ivl_str}{RESET}")
         lines.append(f"  {'Mode':<10}{gray(mode_str)}")
         sched_str = fmt_schedule(cfg.get('start_time') if cfg else None,
                                  cfg.get('end_time')   if cfg else None)
@@ -296,7 +326,7 @@ def draw(procs, lock_only, minutes, sel_idx, flash=None, cfg=None):
     lines.append(f"  {DIM}options{RESET}")
     lines.append(f"  {GRAY}┌{'─' * W}┐{RESET}")
     for i, key in enumerate(items):
-        if key in ('interval', 'lock_toggle', 'schedule', 'days', 'watchdog'):
+        if key in ('interval', 'locked_interval', 'lock_toggle', 'schedule', 'days', 'watchdog'):
             lines.append(_row(i, key))
     lines.append(f"  {GRAY}└{'─' * W}┘{RESET}")
     lines.append("")
@@ -348,7 +378,7 @@ def read_key(timeout=None):
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-def edit_interval(current):
+def edit_interval(current, title='interval'):
     """Spinbox interval editor. Returns (minutes, cancelled)."""
     secs = max(1, round(current * 60))
 
@@ -358,7 +388,7 @@ def edit_interval(current):
         for logo_line in LOGO:
             print(f"  {CYAN}{logo_line}{RESET}")
         print()
-        print(f"  {DIM}interval{RESET}")
+        print(f"  {DIM}{title}{RESET}")
         W = 54
         print(f"  {GRAY}┌{'─' * W}┐{RESET}")
         print(f"  {GRAY}│{RESET}{' ' * W}{GRAY}│{RESET}")
@@ -531,6 +561,8 @@ def launch_mm(minutes, lock_only, cfg=None):
     if cfg is None:
         cfg = {}
     args = [sys.executable, MM_PY, str(minutes)]
+    if cfg.get('locked_interval') is not None:
+        args += ['--locked', str(cfg['locked_interval'])]
     if not lock_only:
         args.append('--always')
     if cfg.get('start_time') and cfg.get('end_time'):
@@ -720,6 +752,8 @@ def main():
                     cfg['lock_only'] if cfg['lock_only'] is not None else False)
     minutes   = _initial[0]['param']    if _initial else (
                     cfg['interval']  if cfg['interval']  is not None else DEFAULT_MINUTES)
+    if _initial:   # reflect what the running daemon actually uses
+        cfg['locked_interval'] = _initial[0]['locked_param']
     sel_idx   = 0
     flash     = None
 
@@ -765,12 +799,24 @@ def main():
                     _restart_if_running(procs, minutes, lock_only, cfg)
 
                 elif action == 'interval':
-                    new_minutes, cancelled = edit_interval(minutes)
+                    new_minutes, cancelled = edit_interval(minutes, 'interval · unlocked')
                     sys.stdout.write(HIDE_CURSOR)
                     sys.stdout.flush()
                     if not cancelled:
+                        # pin the locked interval so it no longer follows this one
+                        cfg['locked_interval'] = locked_minutes(cfg, minutes)
                         minutes = new_minutes
                         cfg['interval'] = minutes
+                        save_config(cfg)
+                        _restart_if_running(procs, minutes, lock_only, cfg)
+
+                elif action == 'locked_interval':
+                    new_minutes, cancelled = edit_interval(
+                        locked_minutes(cfg, minutes), 'interval · locked')
+                    sys.stdout.write(HIDE_CURSOR)
+                    sys.stdout.flush()
+                    if not cancelled:
+                        cfg['locked_interval'] = new_minutes
                         save_config(cfg)
                         _restart_if_running(procs, minutes, lock_only, cfg)
 

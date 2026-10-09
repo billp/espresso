@@ -47,7 +47,8 @@ Navigate with `↑ ↓`, select with `Enter`, quit with `q`.
 
 | Option | Default | Description |
 |---|---|---|
-| Interval | 12 sec | Idle time before the mouse nudges (↑↓ ±1 s, ←→ ±10 s) |
+| Interval unlocked | 12 sec | Idle time before the mouse nudges while the screen is unlocked (↑↓ ±1 s, ←→ ±10 s) |
+| Interval locked | same as unlocked | Idle time before the mouse nudges while the screen is locked |
 | Lock screen only | off | Only move the mouse when the screen is locked |
 | Schedule | always | Active time window (e.g. 09:00→18:00) |
 | Active days | all | Days of the week the daemon is allowed to run |

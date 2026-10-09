@@ -4,7 +4,7 @@ set -euo pipefail
 INSTALL_DIR="${HOME}/.local/bin"
 SCRIPT_NAME="espresso"
 DEST="${INSTALL_DIR}/${SCRIPT_NAME}"
-VERSION="0.0.31"
+VERSION="0.0.34"
 
 mkdir -p "${INSTALL_DIR}"
 
@@ -23,7 +23,7 @@ cat > "${DEST}" << 'END_OF_SCRIPT'
 No args: TUI manager.  --daemon [minutes] [--always]: background process.
 --ensure: start daemon with saved settings if not running (watchdog).
 --install-agent / --uninstall-agent: manage the auto-restart LaunchAgent."""
-__version__ = "0.0.31"
+__version__ = "0.0.34"
 import os, sys, ctypes, time, random, subprocess, signal
 
 _DAEMON_MODE = '--daemon' in sys.argv
@@ -175,6 +175,7 @@ def jiggle(origin, width, height):
 
 def _daemon_main():
     minutes      = 0.2
+    locked_min   = None
     always_mode  = False
     start_hm     = None
     end_hm       = None
@@ -186,6 +187,12 @@ def _daemon_main():
         a = args[i]
         if a == '--always':
             always_mode = True
+        elif a == '--locked' and i + 1 < len(args):
+            i += 1
+            try:
+                locked_min = float(args[i])
+            except ValueError:
+                pass
         elif a == '--start' and i + 1 < len(args):
             i += 1
             start_hm = _parse_hhmm(args[i])
@@ -209,11 +216,16 @@ def _daemon_main():
     bounds   = _cg.CGDisplayBounds(display)
     width    = bounds.size.width
     height   = bounds.size.height
-    interval = minutes * 60
-    poll     = min(5.0, max(1.0, interval / 4.0))
+    unlocked_interval = minutes * 60
+    locked_interval   = (locked_min if locked_min is not None else minutes) * 60
+    # lock state is only known after an ioreg call, so wait out the shorter
+    # of the intervals that can apply before asking
+    shortest = locked_interval if not always_mode else min(locked_interval, unlocked_interval)
+    poll     = min(5.0, max(1.0, shortest / 4.0))
 
-    resting  = get_mouse_pos()      # where the cursor was left after the last cycle
-    deadline = time.monotonic() + interval
+    resting    = get_mouse_pos()    # where the cursor was left after the last cycle
+    idle_since = time.monotonic()   # last user input or nudge
+    next_check = idle_since + shortest
 
     while True:
         time.sleep(poll)
@@ -221,30 +233,41 @@ def _daemon_main():
 
         cur = get_mouse_pos()
         if moved(cur, resting):     # the user is driving — start the wait over
-            resting  = cur
-            deadline = now + interval
+            resting    = cur
+            idle_since = now
+            next_check = now + shortest
             continue
         resting = cur
 
         idle = seconds_since_input()
-        if idle is not None and idle < interval:
-            deadline = max(deadline, now + (interval - idle))
+        if idle is not None:
+            idle_since = max(idle_since, now - idle)
+        next_check = max(next_check, idle_since + shortest)
 
-        if now < deadline:
+        if now < next_check:
             continue
 
         # only worth the ioreg call once the idle timer has actually run out
-        if not always_mode and not is_locked():
-            deadline = now + interval
+        if is_locked():
+            interval = locked_interval
+        elif always_mode:
+            interval = unlocked_interval
+        else:
+            next_check = now + shortest
+            continue
+
+        if now - idle_since < interval:
+            next_check = min(now + shortest, idle_since + interval)
             continue
 
         if not is_within_schedule(start_hm, end_hm, allowed_days):
-            deadline = now + interval
+            next_check = now + shortest
             continue
 
         jiggle(get_mouse_pos(), width, height)
-        resting  = get_mouse_pos()
-        deadline = time.monotonic() + interval
+        resting    = get_mouse_pos()
+        idle_since = time.monotonic()
+        next_check = idle_since + shortest
 
 
 # ── TUI manager ────────────────────────────────────────────────────────────
@@ -283,8 +306,8 @@ if not _DAEMON_MODE:
     AGENT_PLIST     = os.path.expanduser('~/Library/LaunchAgents/com.espresso.watchdog.plist')
     AGENT_LOG       = '/tmp/espresso-agent.log'
 
-    ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
-    ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
+    ITEMS_NOT_RUNNING = ['run',  'quit', 'interval', 'locked_interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
+    ITEMS_RUNNING     = ['stop', 'quit', 'interval', 'locked_interval', 'lock_toggle', 'schedule', 'days', 'watchdog']
 
     DAY_NAMES = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
 
@@ -302,6 +325,7 @@ if not _DAEMON_MODE:
             'end_time':   cfg.get('end_time'),
             'days':       cfg.get('days'),
             'interval':   cfg.get('interval'),
+            'locked_interval': cfg.get('locked_interval'),
             'lock_only':  cfg.get('lock_only'),
         }
 
@@ -348,6 +372,7 @@ if not _DAEMON_MODE:
                 continue
 
             minutes    = DEFAULT_MINUTES
+            locked     = None
             lock_only  = True
             start_time = None
             end_time   = None
@@ -360,6 +385,12 @@ if not _DAEMON_MODE:
                     tok = rest[j]
                     if tok == '--always':
                         lock_only = False
+                    elif tok == '--locked' and j + 1 < len(rest):
+                        j += 1
+                        try:
+                            locked = float(rest[j])
+                        except ValueError:
+                            pass
                     elif tok == '--start' and j + 1 < len(rest):
                         j += 1
                         start_time = rest[j]
@@ -382,7 +413,9 @@ if not _DAEMON_MODE:
                 pass
 
             procs.append({
-                'pid': pid, 'param': minutes, 'lock_only': lock_only,
+                'pid': pid, 'param': minutes,
+                'locked_param': locked if locked is not None else minutes,
+                'lock_only': lock_only,
                 'start_time': start_time, 'end_time': end_time, 'days': days,
             })
 
@@ -408,6 +441,12 @@ if not _DAEMON_MODE:
 
     def fmt_secs(minutes):
         return f"{minutes * 60:g}"
+
+
+    def locked_minutes(cfg, minutes):
+        """Locked-screen interval; falls back to the unlocked one when unset."""
+        v = cfg.get('locked_interval') if cfg else None
+        return v if v is not None else minutes
 
 
     def fmt_schedule(start_time, end_time):
@@ -443,9 +482,18 @@ if not _DAEMON_MODE:
 
         # ── option items: label left, bracket right ──
         if key == 'interval':
-            lbl = (f"{BOLD}{WHITE}Interval{RESET} {GRAY}(seconds){RESET}" if selected
-                   else f"{GRAY}Interval (seconds){RESET}")
+            lbl = (f"{BOLD}{WHITE}Interval unlocked{RESET} {GRAY}(sec){RESET}" if selected
+                   else f"{GRAY}Interval unlocked (sec){RESET}")
             val_raw = f"[{fmt_secs(minutes)}]"
+            if lock_only:   # unused while lock-screen-only is on
+                cb = f"{DIM}{val_raw}{RESET}"
+            else:
+                cb = f"{BOLD}{CYAN}{val_raw}{RESET}" if selected else f"{CYAN}{val_raw}{RESET}"
+
+        elif key == 'locked_interval':
+            lbl = (f"{BOLD}{WHITE}Interval locked{RESET} {GRAY}(sec){RESET}" if selected
+                   else f"{GRAY}Interval locked (sec){RESET}")
+            val_raw = f"[{fmt_secs(locked_minutes(cfg, minutes))}]"
             cb  = f"{BOLD}{CYAN}{val_raw}{RESET}" if selected else f"{CYAN}{val_raw}{RESET}"
 
         elif key == 'lock_toggle':
@@ -506,7 +554,12 @@ if not _DAEMON_MODE:
             mode_str = "Lock screen only" if p['lock_only'] else "Always (ignore lock)"
             lines.append(f"  {'Status':<10}{green('● RUNNING')}")
             lines.append(f"  {'PID':<10}{WHITE}{p['pid']}{RESET}")
-            lines.append(f"  {'Interval':<10}{WHITE}{fmt_param(p['param'])}{RESET}")
+            if p['lock_only']:
+                ivl_str = f"{fmt_param(p['locked_param'])} locked"
+            else:
+                ivl_str = (f"{fmt_param(p['param'])} unlocked · "
+                           f"{fmt_param(p['locked_param'])} locked")
+            lines.append(f"  {'Interval':<10}{WHITE}{ivl_str}{RESET}")
             lines.append(f"  {'Mode':<10}{gray(mode_str)}")
             sched_str = fmt_schedule(cfg.get('start_time') if cfg else None,
                                      cfg.get('end_time')   if cfg else None)
@@ -545,7 +598,7 @@ if not _DAEMON_MODE:
         lines.append(f"  {DIM}options{RESET}")
         lines.append(f"  {GRAY}┌{'─' * W}┐{RESET}")
         for i, key in enumerate(items):
-            if key in ('interval', 'lock_toggle', 'schedule', 'days', 'watchdog'):
+            if key in ('interval', 'locked_interval', 'lock_toggle', 'schedule', 'days', 'watchdog'):
                 lines.append(_row(i, key))
         lines.append(f"  {GRAY}└{'─' * W}┘{RESET}")
         lines.append("")
@@ -597,7 +650,7 @@ if not _DAEMON_MODE:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-    def edit_interval(current):
+    def edit_interval(current, title='interval'):
         """Spinbox interval editor. Returns (minutes, cancelled)."""
         secs = max(1, round(current * 60))
 
@@ -607,7 +660,7 @@ if not _DAEMON_MODE:
             for logo_line in LOGO:
                 print(f"  {CYAN}{logo_line}{RESET}")
             print()
-            print(f"  {DIM}interval{RESET}")
+            print(f"  {DIM}{title}{RESET}")
             W = 54
             print(f"  {GRAY}┌{'─' * W}┐{RESET}")
             print(f"  {GRAY}│{RESET}{' ' * W}{GRAY}│{RESET}")
@@ -780,6 +833,8 @@ if not _DAEMON_MODE:
         if cfg is None:
             cfg = {}
         args = [sys.executable, SCRIPT_SELF, '--daemon', str(minutes)]
+        if cfg.get('locked_interval') is not None:
+            args += ['--locked', str(cfg['locked_interval'])]
         if not lock_only:
             args.append('--always')
         if cfg.get('start_time') and cfg.get('end_time'):
@@ -969,6 +1024,8 @@ if not _DAEMON_MODE:
                         cfg['lock_only'] if cfg['lock_only'] is not None else False)
         minutes   = _initial[0]['param']    if _initial else (
                         cfg['interval']  if cfg['interval']  is not None else DEFAULT_MINUTES)
+        if _initial:   # reflect what the running daemon actually uses
+            cfg['locked_interval'] = _initial[0]['locked_param']
         sel_idx   = 0
         flash     = None
 
@@ -1014,12 +1071,24 @@ if not _DAEMON_MODE:
                         _restart_if_running(procs, minutes, lock_only, cfg)
 
                     elif action == 'interval':
-                        new_minutes, cancelled = edit_interval(minutes)
+                        new_minutes, cancelled = edit_interval(minutes, 'interval · unlocked')
                         sys.stdout.write(HIDE_CURSOR)
                         sys.stdout.flush()
                         if not cancelled:
+                            # pin the locked interval so it no longer follows this one
+                            cfg['locked_interval'] = locked_minutes(cfg, minutes)
                             minutes = new_minutes
                             cfg['interval'] = minutes
+                            save_config(cfg)
+                            _restart_if_running(procs, minutes, lock_only, cfg)
+
+                    elif action == 'locked_interval':
+                        new_minutes, cancelled = edit_interval(
+                            locked_minutes(cfg, minutes), 'interval · locked')
+                        sys.stdout.write(HIDE_CURSOR)
+                        sys.stdout.flush()
+                        if not cancelled:
+                            cfg['locked_interval'] = new_minutes
                             save_config(cfg)
                             _restart_if_running(procs, minutes, lock_only, cfg)
 
@@ -1088,6 +1157,17 @@ END_OF_SCRIPT
 chmod +x "${DEST}"
 
 echo "✓ Installed: ${DEST}"
+
+# ── stop a daemon still running the previous version ───────────────────────
+PIDS=$(pgrep -f -- "${DEST} --daemon" || true)
+if [ -n "${PIDS}" ]; then
+    kill ${PIDS} 2>/dev/null || true
+    if [ -f "${HOME}/Library/LaunchAgents/com.espresso.watchdog.plist" ]; then
+        echo "✓ Stopped old daemon (PID $(echo ${PIDS})) — watchdog will restart it within a minute"
+    else
+        echo "✓ Stopped old daemon (PID $(echo ${PIDS})) — start it again from espresso"
+    fi
+fi
 
 case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
