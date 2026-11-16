@@ -628,9 +628,29 @@ def agent_installed():
     return os.path.exists(AGENT_PLIST)
 
 
+def _real_python():
+    """Path of the Python binary actually running this process.
+
+    sys.executable may be a stub (e.g. /usr/bin/python3) that execs the real
+    interpreter. The LaunchAgent must launch the real binary directly: macOS
+    checks Accessibility permission against the program launchd starts, so
+    going through a shebang, /usr/bin/env or a stub leaves the daemon unable
+    to move the mouse."""
+    try:
+        import ctypes
+        buf = ctypes.create_string_buffer(4096)
+        n = ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidpath(os.getpid(), buf, 4096)
+        if n > 0:
+            return buf.value.decode()
+    except Exception:
+        pass
+    return os.path.abspath(sys.executable)
+
+
 def _agent_plist_xml():
     """Build the LaunchAgent plist that runs `espresso --ensure` every 60s."""
     espresso = os.path.abspath(sys.argv[0])
+    python   = _real_python()
     py_dir   = os.path.dirname(os.path.abspath(sys.executable))
     path_env = ':'.join([
         os.path.expanduser('~/.local/bin'), py_dir,
@@ -644,6 +664,7 @@ def _agent_plist_xml():
     <string>{AGENT_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
+        <string>{python}</string>
         <string>{espresso}</string>
         <string>--ensure</string>
     </array>

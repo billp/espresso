@@ -296,6 +296,11 @@ if [ -n "${PIDS}" ]; then
     fi
 fi
 
+# ── refresh the watchdog LaunchAgent so its plist matches this version ──────
+if [ -f "${HOME}/Library/LaunchAgents/com.espresso.watchdog.plist" ]; then
+    "${DEST}" --install-agent >/dev/null 2>&1 || echo "  Note: could not refresh watchdog — toggle it off/on in espresso"
+fi
+
 case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
     *) echo "  Note: add to PATH → export PATH=\\"${INSTALL_DIR}:\\$PATH\\"" ;;

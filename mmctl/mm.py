@@ -63,6 +63,18 @@ try:
 except AttributeError:  # not available — fall back to cursor tracking alone
     _cg.CGEventSourceSecondsSinceLastEventType = None
 
+# Posting synthetic events needs Accessibility permission. macOS grants it to
+# the "responsible" app: the terminal when launched from a shell, but the bare
+# Python binary when launched by launchd (the watchdog, e.g. after a reboot).
+# Without it CGEventPost silently does nothing.
+try:
+    _cg.CGPreflightPostEventAccess.restype = ctypes.c_bool
+    _cg.CGPreflightPostEventAccess.argtypes = []
+    _cg.CGRequestPostEventAccess.restype = ctypes.c_bool
+    _cg.CGRequestPostEventAccess.argtypes = []
+except AttributeError:  # pre-10.15 — no TCC gate on event posting
+    _cg.CGPreflightPostEventAccess = None
+
 kCGEventMouseMoved = 5
 kCGHIDEventTap = 0
 kCGMouseButtonLeft = 0
@@ -129,6 +141,41 @@ def seconds_since_input():
             kCGEventSourceStateHIDSystemState, kCGAnyInputEventType)
     except Exception:
         return None
+
+
+def has_post_access():
+    if _cg.CGPreflightPostEventAccess is None:
+        return True
+    try:
+        return bool(_cg.CGPreflightPostEventAccess())
+    except Exception:
+        return True
+
+
+def _real_executable():
+    """Path of the binary actually running (sys.executable may be a stub)."""
+    try:
+        import os
+        buf = ctypes.create_string_buffer(4096)
+        n = ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidpath(os.getpid(), buf, 4096)
+        if n > 0:
+            return buf.value.decode()
+    except Exception:
+        pass
+    return sys.executable
+
+
+def request_post_access():
+    """Ask macOS for permission (adds this binary to Privacy > Accessibility)."""
+    if _cg.CGPreflightPostEventAccess is None:
+        return
+    print(f'[espresso] no permission to move the mouse. Enable this binary in '
+          f'System Settings > Privacy & Security > Accessibility:\n  {_real_executable()}',
+          flush=True)
+    try:
+        _cg.CGRequestPostEventAccess()
+    except Exception:
+        pass
 
 
 def moved(a, b):
@@ -203,6 +250,10 @@ def main():
     shortest = locked_interval if not always_mode else min(locked_interval, unlocked_interval)
     poll     = min(5.0, max(1.0, shortest / 4.0))
 
+    access_ok = has_post_access()
+    if not access_ok:
+        request_post_access()
+
     resting    = get_mouse_pos()    # where the cursor was left after the last cycle
     idle_since = time.monotonic()   # last user input or nudge
     next_check = idle_since + shortest
@@ -243,6 +294,13 @@ def main():
         if not is_within_schedule(start_hm, end_hm, allowed_days):
             next_check = now + shortest
             continue
+
+        if not access_ok:
+            access_ok = has_post_access()
+            if not access_ok:
+                next_check = now + shortest
+                continue
+            print('[espresso] mouse permission granted', flush=True)
 
         jiggle(get_mouse_pos(), width, height)
         resting    = get_mouse_pos()

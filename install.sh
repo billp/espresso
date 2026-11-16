@@ -4,7 +4,7 @@ set -euo pipefail
 INSTALL_DIR="${HOME}/.local/bin"
 SCRIPT_NAME="espresso"
 DEST="${INSTALL_DIR}/${SCRIPT_NAME}"
-VERSION="0.0.34"
+VERSION="0.0.37"
 
 mkdir -p "${INSTALL_DIR}"
 
@@ -23,7 +23,7 @@ cat > "${DEST}" << 'END_OF_SCRIPT'
 No args: TUI manager.  --daemon [minutes] [--always]: background process.
 --ensure: start daemon with saved settings if not running (watchdog).
 --install-agent / --uninstall-agent: manage the auto-restart LaunchAgent."""
-__version__ = "0.0.34"
+__version__ = "0.0.37"
 import os, sys, ctypes, time, random, subprocess, signal
 
 _DAEMON_MODE = '--daemon' in sys.argv
@@ -82,6 +82,18 @@ try:
     _cg.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
 except AttributeError:  # not available — fall back to cursor tracking alone
     _cg.CGEventSourceSecondsSinceLastEventType = None
+
+# Posting synthetic events needs Accessibility permission. macOS grants it to
+# the "responsible" app: the terminal when launched from a shell, but the bare
+# Python binary when launched by launchd (the watchdog, e.g. after a reboot).
+# Without it CGEventPost silently does nothing.
+try:
+    _cg.CGPreflightPostEventAccess.restype = ctypes.c_bool
+    _cg.CGPreflightPostEventAccess.argtypes = []
+    _cg.CGRequestPostEventAccess.restype = ctypes.c_bool
+    _cg.CGRequestPostEventAccess.argtypes = []
+except AttributeError:  # pre-10.15 — no TCC gate on event posting
+    _cg.CGPreflightPostEventAccess = None
 
 kCGEventMouseMoved = 5
 kCGHIDEventTap = 0
@@ -149,6 +161,41 @@ def seconds_since_input():
             kCGEventSourceStateHIDSystemState, kCGAnyInputEventType)
     except Exception:
         return None
+
+
+def has_post_access():
+    if _cg.CGPreflightPostEventAccess is None:
+        return True
+    try:
+        return bool(_cg.CGPreflightPostEventAccess())
+    except Exception:
+        return True
+
+
+def _real_executable():
+    """Path of the binary actually running (sys.executable may be a stub)."""
+    try:
+        import os
+        buf = ctypes.create_string_buffer(4096)
+        n = ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidpath(os.getpid(), buf, 4096)
+        if n > 0:
+            return buf.value.decode()
+    except Exception:
+        pass
+    return sys.executable
+
+
+def request_post_access():
+    """Ask macOS for permission (adds this binary to Privacy > Accessibility)."""
+    if _cg.CGPreflightPostEventAccess is None:
+        return
+    print(f'[espresso] no permission to move the mouse. Enable this binary in '
+          f'System Settings > Privacy & Security > Accessibility:\n  {_real_executable()}',
+          flush=True)
+    try:
+        _cg.CGRequestPostEventAccess()
+    except Exception:
+        pass
 
 
 def moved(a, b):
@@ -223,6 +270,10 @@ def _daemon_main():
     shortest = locked_interval if not always_mode else min(locked_interval, unlocked_interval)
     poll     = min(5.0, max(1.0, shortest / 4.0))
 
+    access_ok = has_post_access()
+    if not access_ok:
+        request_post_access()
+
     resting    = get_mouse_pos()    # where the cursor was left after the last cycle
     idle_since = time.monotonic()   # last user input or nudge
     next_check = idle_since + shortest
@@ -263,6 +314,13 @@ def _daemon_main():
         if not is_within_schedule(start_hm, end_hm, allowed_days):
             next_check = now + shortest
             continue
+
+        if not access_ok:
+            access_ok = has_post_access()
+            if not access_ok:
+                next_check = now + shortest
+                continue
+            print('[espresso] mouse permission granted', flush=True)
 
         jiggle(get_mouse_pos(), width, height)
         resting    = get_mouse_pos()
@@ -900,9 +958,29 @@ if not _DAEMON_MODE:
         return os.path.exists(AGENT_PLIST)
 
 
+    def _real_python():
+        """Path of the Python binary actually running this process.
+
+        sys.executable may be a stub (e.g. /usr/bin/python3) that execs the real
+        interpreter. The LaunchAgent must launch the real binary directly: macOS
+        checks Accessibility permission against the program launchd starts, so
+        going through a shebang, /usr/bin/env or a stub leaves the daemon unable
+        to move the mouse."""
+        try:
+            import ctypes
+            buf = ctypes.create_string_buffer(4096)
+            n = ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidpath(os.getpid(), buf, 4096)
+            if n > 0:
+                return buf.value.decode()
+        except Exception:
+            pass
+        return os.path.abspath(sys.executable)
+
+
     def _agent_plist_xml():
         """Build the LaunchAgent plist that runs `espresso --ensure` every 60s."""
         espresso = os.path.abspath(sys.argv[0])
+        python   = _real_python()
         py_dir   = os.path.dirname(os.path.abspath(sys.executable))
         path_env = ':'.join([
             os.path.expanduser('~/.local/bin'), py_dir,
@@ -916,6 +994,7 @@ if not _DAEMON_MODE:
         <string>{AGENT_LABEL}</string>
         <key>ProgramArguments</key>
         <array>
+            <string>{python}</string>
             <string>{espresso}</string>
             <string>--ensure</string>
         </array>
@@ -1167,6 +1246,11 @@ if [ -n "${PIDS}" ]; then
     else
         echo "✓ Stopped old daemon (PID $(echo ${PIDS})) — start it again from espresso"
     fi
+fi
+
+# ── refresh the watchdog LaunchAgent so its plist matches this version ──────
+if [ -f "${HOME}/Library/LaunchAgents/com.espresso.watchdog.plist" ]; then
+    "${DEST}" --install-agent >/dev/null 2>&1 || echo "  Note: could not refresh watchdog — toggle it off/on in espresso"
 fi
 
 case ":${PATH}:" in
